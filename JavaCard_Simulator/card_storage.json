@@ -1,0 +1,9 @@
+{
+    "user_id": "user001",
+    "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgGh/nvf7aoFGf/MO4vARe6C+eDuw4bFaQOCIV+S+QDvehRANCAAReCrqpn05k/jX5uxJkeSpeT/bwJlx4d3RDMaSrC1L5ONj+ZPvU3YrdG3Zj3EdcS/wDdDX4zhpqOH9K2/ZO/YA0",
+    "encrypted_data": {
+        "key_b64": "ykPc8ntUsSD8HqfdgEJT4I9kNfj4G9YzZAPp0qoD770=",
+        "nonce_b64": "6nUnFmStzvq9JmaP",
+        "ciphertext_b64": "jhooLF3Bf1lqr9skYedq1fWE0QOSgSjZyzO7hlWoyFUeNwB1HPfl9YDTDUxHh6AO4gkZLZU+hj4Faay5AJPiHyphD6dmW3h+P2fbl6QVC4deyUuEilaE7buxjh1VdkhXUWPMkPZ/Lfk3FKRP5h9iZQ=="
+    }
+}

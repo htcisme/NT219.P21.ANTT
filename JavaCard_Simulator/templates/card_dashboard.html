@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JavaCard Simulator Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .card { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .card.active { border: 3px solid #27ae60; }
+        .card.suspended { opacity: 0.6; background: #ffe6e6; }
+        .card.revoked { opacity: 0.6; background: #ffcccc; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .card-name { font-size: 18px; font-weight: bold; }
+        .card-status { padding: 4px 8px; border-radius: 4px; font-size: 12px; color: white; }
+        .status-active { background: #27ae60; }
+        .status-suspended { background: #f39c12; }
+        .status-revoked { background: #e74c3c; }
+        .card-details { margin-bottom: 15px; }
+        .card-detail { margin: 5px 0; }
+        .select-btn { background: #3498db; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+        .select-btn:hover { background: #2980b9; }
+        .select-btn:disabled { background: #bdc3c7; cursor: not-allowed; }
+        .attack-panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .attack-mode { margin: 10px 0; }
+        .attack-btn { background: #e74c3c; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 5px; }
+        .attack-btn:hover { background: #c0392b; }
+        .attack-btn.active { background: #8e44ad; }
+        .normal-btn { background: #27ae60; }
+        .normal-btn:hover { background: #219a52; }
+        .current-status { background: #ecf0f1; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🃏 JavaCard Simulator Dashboard</h1>
+            <p>Simulate various cards and attack scenarios for security testing</p>
+        </div>
+
+        <div class="current-status">
+            <h3>Current Status</h3>
+            {% if current_card_id %}
+                <p><strong>Active Card:</strong> {{ cards[current_card_id]['name'] }} ({{ cards[current_card_id]['user_id'] }})</p>
+            {% else %}
+                <p><strong>Active Card:</strong> None selected</p>
+            {% endif %}
+            <p><strong>Attack Mode:</strong> 
+                {% if attack_mode %}
+                    <span style="color: red;">{{ attack_mode.upper() }}</span>
+                {% else %}
+                    <span style="color: green;">NORMAL</span>
+                {% endif %}
+            </p>
+        </div>
+
+        <div class="attack-panel">
+            <h3>⚠️ Attack Scenarios</h3>
+            <p>Select attack mode to test security vulnerabilities:</p>
+            <button class="attack-btn normal-btn {% if not attack_mode %}active{% endif %}" onclick="setAttackMode('none')">
+                Normal Operation
+            </button>
+            <button class="attack-btn {% if attack_mode == 'mitm' %}active{% endif %}" onclick="setAttackMode('mitm')">
+                Man-in-the-Middle
+            </button>
+            <button class="attack-btn {% if attack_mode == 'fake_card' %}active{% endif %}" onclick="setAttackMode('fake_card')">
+                Fake Card Data
+            </button>
+            <button class="attack-btn {% if attack_mode == 'replay' %}active{% endif %}" onclick="setAttackMode('replay')">
+                Replay Attack
+            </button>
+        </div>
+
+        <h2>Available Cards</h2>
+        <div class="cards-grid">
+            {% for card_id, card in cards.items() %}
+            <div class="card {% if card_id == current_card_id %}active{% endif %} {{ card.status }}">
+                <div class="card-header">
+                    <div class="card-name">{{ card.name }}</div>
+                    <div class="card-status status-{{ card.status }}">{{ card.status.upper() }}</div>
+                </div>
+                <div class="card-details">
+                    <div class="card-detail"><strong>User ID:</strong> {{ card.user_id }}</div>
+                    <div class="card-detail"><strong>Employee ID:</strong> {{ card.employee_id if card.employee_id else 'N/A' }}</div>
+                    <div class="card-detail"><strong>Card ID:</strong> {{ card.card_id }}</div>
+                    <div class="card-detail"><strong>Created:</strong> {{ card.created_at[:10] }}</div>
+                </div>
+                <button class="select-btn" onclick="selectCard('{{ card_id }}')" 
+                        {% if card_id == current_card_id %}disabled{% endif %}>
+                    {% if card_id == current_card_id %}Currently Active{% else %}Select Card{% endif %}
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+        function selectCard(cardId) {
+            fetch(`/select_card/${cardId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        location.reload();
+                    } else {
+                        alert('Failed to select card: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Network error occurred');
+                });
+        }
+
+        function setAttackMode(mode) {
+            fetch(`/set_attack_mode/${mode}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        location.reload();
+                    } else {
+                        alert('Failed to set attack mode: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Network error occurred');
+                });
+        }
+
+        // Auto-refresh every 30 seconds
+        setTimeout(() => location.reload(), 30000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+{
+    "users": {
+        "user001": {
+            "name": "John Doe",
+            "employee_id": "EMP001",
+            "department": "IT Security",
+            "access_level": "L3",
+            "status": "active",
+            "card_keys": [],
+            "access_zones": [
+                "MAIN_ENTRANCE",
+                "SERVER_ROOM",
+                "OFFICE_FLOOR_1"
+            ],
+            "time_restrictions": {
+                "enabled": true,
+                "allowed_hours": "08:00-18:00",
+                "allowed_days": [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday"
+                ]
+            },
+            "biometric_required": false
+        },
+        "user002": {
+            "name": "Jane Smith",
+            "employee_id": "EMP002",
+            "department": "Management",
+            "access_level": "L3",
+            "status": "active",
+            "card_keys": [],
+            "access_zones": [
+                "MAIN_ENTRANCE",
+                "OFFICE_FLOOR_1",
+                "MANAGEMENT_FLOOR"
+            ],
+            "time_restrictions": {
+                "enabled": false
+            },
+            "biometric_required": true
+        },
+        "user003": {
+            "name": "Bob Wilson",
+            "employee_id": "EMP003",
+            "department": "Finance",
+            "access_level": "L2",
+            "status": "active",
+            "card_keys": [],
+            "access_zones": [
+                "MAIN_ENTRANCE",
+                "OFFICE_FLOOR_1"
+            ],
+            "time_restrictions": {
+                "enabled": true,
+                "allowed_hours": "09:00-17:00",
+                "allowed_days": [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday"
+                ]
+            },
+            "biometric_required": false
+        },
+        "user004": {
+            "name": "Alice Brown",
+            "employee_id": "EMP004",
+            "department": "HR",
+            "access_level": "L1",
+            "status": "suspended",
+            "card_keys": [],
+            "access_zones": [
+                "MAIN_ENTRANCE"
+            ],
+            "time_restrictions": {
+                "enabled": true,
+                "allowed_hours": "08:00-17:00",
+                "allowed_days": [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday"
+                ]
+            },
+            "biometric_required": false
+        },
+        "attacker001": {
+            "name": "Evil Hacker",
+            "employee_id": "FAKE001",
+            "department": "Unknown",
+            "access_level": "L0",
+            "status": "revoked",
+            "card_keys": [],
+            "access_zones": [],
+            "time_restrictions": {
+                "enabled": true,
+                "allowed_hours": "00:00-00:00",
+                "allowed_days": []
+            },
+            "biometric_required": false
+        }
+    },
+    "zones": {
+        "MAIN_ENTRANCE": {
+            "name": "Main Entrance",
+            "required_level": "L1",
+            "description": "Building main entrance"
+        },
+        "OFFICE_FLOOR_1": {
+            "name": "Office Floor 1",
+            "required_level": "L2",
+            "description": "General office area"
+        },
+        "SERVER_ROOM": {
+            "name": "Server Room",
+            "required_level": "L3",
+            "description": "Critical infrastructure"
+        },
+        "MANAGEMENT_FLOOR": {
+            "name": "Management Floor",
+            "required_level": "L3",
+            "description": "Executive offices"
+        }
+    }
+}

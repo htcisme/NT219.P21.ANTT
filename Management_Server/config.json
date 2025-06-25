@@ -1,0 +1,16 @@
+{
+  "server_id": "management_server_01",
+  "host": "0.0.0.0",
+  "port": 5000,
+  "certificates_dir": "../CA_Authority/certificates",
+  "private_key_file": "../CA_Authority/certificates/server_private_key.key",
+  "certificate_file": "../CA_Authority/certificates/server_cert.json",
+  "ca_public_key_file": "../CA_Authority/certificates/ca_public_key.key",
+  "authorized_users": {
+    "user001": {
+      "access_level": "L3",
+      "departments": ["IT Security", "Management"],
+      "status": "active"
+    }
+  }
+}

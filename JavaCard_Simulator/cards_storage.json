@@ -1,0 +1,67 @@
+{
+    "2618aa6f": {
+        "card_id": "2618aa6f",
+        "user_id": "user001",
+        "name": "John Doe",
+        "status": "active",
+        "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgqd+4BHLD/rtbt1+vivaOJGXFsLsSU8fixztD4Jz+fAShRANCAASGP489JW998rm3LdhDY3r31xudY1HCJeozN8zlRO8SbFirDLCd1iT1LgIvAB88xzOhiffr4hdf9Xtwc9FktKUl",
+        "encrypted_data": {
+            "key_b64": "GSu3hDTjthht0mo4W/xt+GMYNKl2yZF3o9gLyghkR6M=",
+            "nonce_b64": "uR+NYjvEB9m9ytKy",
+            "ciphertext_b64": "563CjB/yAmD7cgXXIWfYJF4U2pQVWI8Cdx508XoU695I+k+M6WcUhWpDxdX5nTC7W1bS17fpWp2gEyZJuTVeTg0A/zvU2f1W8dvJgn1P7rZI8jbF6cOQlvTfgz40jzFkrWaEDqbi7xPHhLwmwT3IFblesXAVDPzRDjuYb08OQOhe/esN8yMmNEY42q/eRImyMBLxaOnRNSQhCg=="
+        },
+        "created_at": "2025-06-25T17:59:57.828250"
+    },
+    "37074807": {
+        "card_id": "37074807",
+        "user_id": "user002",
+        "name": "Jane Smith",
+        "status": "active",
+        "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgnY2jAxiQ4qCWsfWkcXcnLQqmezJ1B1oGz0HaATU6CSqhRANCAATzcG72YouKmb5DTnppnjoUp9DHKfSRgJ2FerXxv3GSbc6U35dhRDvPPzQ2z4jAQHmJlb1pf//pIVj2GYyvBshk",
+        "encrypted_data": {
+            "key_b64": "6R3tC1qaB8Tyf2V+bzC+VN3ObllEbgCghjTgWVtHtpY=",
+            "nonce_b64": "//oM+Y3YM4ePZ7FT",
+            "ciphertext_b64": "PaVP3vDwXnzTPKFQ48xz2KnsMsU4X+8/zw9tNzGTxhN4wzpDk7ipl1i2kEqjbpV1iJg5R8Kr2FDa8Aiup78UOcrV+kpKR/8F6X/QsPX/EsimIb8i5O0eylge3aZY1moOdBM9iEVCvO59J0pRJphCm8IpIU7eHXzS/OSG0jK49RU9LA4XVKQwBs7uiGIQKsUV54sjwTfEM9kUsAo="
+        },
+        "created_at": "2025-06-25T17:59:57.828350"
+    },
+    "21a97044": {
+        "card_id": "21a97044",
+        "user_id": "user003",
+        "name": "Bob Wilson",
+        "status": "active",
+        "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYCTH7lr6unGYl28hKpsBKr7l7+Y5kSoFi6nBqmOe6l+hRANCAATMUjoCKc3QMMWaMz8/IXXEqh5jkvFjedW20AJMYGIqC9E2txYwsy/SBBokXUCiAnT97ceFsfKHOcuuYi1T9NqO",
+        "encrypted_data": {
+            "key_b64": "OyfdMwvhZMm6h9kDGaDX36PXz9bMYdzpRUMe8OGqEks=",
+            "nonce_b64": "OHThekkc+lxzm+Gp",
+            "ciphertext_b64": "sJ6xn8l6Cp1wEtOY6y2bugJenyzr3e2alAHcfkT7KB2UNZFlZsiowbXKljMlCVgBB1TVQPxmZ+lMIuebGNwGbLcj/5tYLbIrGcg0OsX1lvWkFcCcPRofVMWfXjmg46QefuXQF5zrOYd98+F/QUzQVF9vzq3HyeO997B/+X5hCLWAO8EryCd3Un8T4pkhkT8fNkwi2V0MqsE="
+        },
+        "created_at": "2025-06-25T17:59:57.828387"
+    },
+    "769c9a9e": {
+        "card_id": "769c9a9e",
+        "user_id": "user004",
+        "name": "Alice Brown",
+        "status": "suspended",
+        "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgfQ5TuvZ2kBlH+Hfa4GmEl51SwGaUqGrQZEiiWkF6rvuhRANCAARzG01p2N4Qd7h4viGD26Dds42TfS4OIZLWuHg+z2ZIMzuttJd1D3H+jXXyPl6u05Ppnjb3wbmCxoOk2NFM/jhs",
+        "encrypted_data": {
+            "key_b64": "H8H0u5cAnGtvOa04sx5ZF15XoFbNUFN6wlDNrSUF0ak=",
+            "nonce_b64": "Fkxp/D9LflG/vs7i",
+            "ciphertext_b64": "/ycZchZW4W0KVNteEYU4vmMNDSlLZGZBiqw7mGKrNrHJ8xgSQO4MqEp5NHzSiZNzvPYrL+b7UmKEKstKM+D3Nxw4ruBa4vDPQ9NtRXfwSPTTosvL+26gjn7QLzkZPSJ2MkmqwRlDcFgLXp3VxRLGwtcA66v09InFaUn4Oj36Qzr4k5gAIppVrVUE1a6lHJgfKqm0+zc0LQ=="
+        },
+        "created_at": "2025-06-25T17:59:57.828444"
+    },
+    "eb69b934": {
+        "card_id": "eb69b934",
+        "user_id": "attacker001",
+        "name": "Evil Hacker",
+        "status": "revoked",
+        "private_key_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZfpVwpr+0dho6VMDJ0fB0QuOJ0007/+6UL0wgkN+sMehRANCAARJ1nMpJbu1L8Ne7zsn9bhNZ+ZIDvqEf6TKMxNn+7HiMVJb4QTcf+UXCRSrt/hVOIzYoXvP7krjx3bKF4Fjc1sz",
+        "encrypted_data": {
+            "key_b64": "EXRsjBvMNnzmRCXri0azn1nxvWQ/g3W7H9ce47Xkp/g=",
+            "nonce_b64": "BS6sl+pWVjAQqJNu",
+            "ciphertext_b64": "tUWykbzzGBSGVPvV5AIw9vuM5yydo20A5kkaJp9T8gy6rEYWnUqPJSHKk8BqzY/mmyWP8EUnuFqfArZzLgKGIJ5PnclAFPYgfwrO1T1GoNnE2nYfW7PZNeA2Yg1FYSbO+z1KuMSIoNQSpqpq5aQbb0YcwldLeZzczRX6i8lHlkt5C9wO4opEx3H7Z678wPfjhK52bmAeXDgYE40G2djc"
+        },
+        "created_at": "2025-06-25T17:59:57.828487"
+    }
+}

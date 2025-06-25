@@ -1,0 +1,9 @@
+{
+  "reader_id": "reader_pi_01",
+  "server_url": "http://localhost:8000/intercept/server",
+  "card_simulator_url": "http://localhost:8000/intercept/card",
+  "certificates_dir": "../CA_Authority/certificates",
+  "private_key_file": "../CA_Authority/certificates/reader_private_key.key",
+  "certificate_file": "../CA_Authority/certificates/reader_cert.json",
+  "ca_public_key_file": "../CA_Authority/certificates/ca_public_key.key"
+}
